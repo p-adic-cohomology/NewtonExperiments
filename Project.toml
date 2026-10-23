@@ -1,7 +1,7 @@
 name = "NewtonExperiments"
 uuid = "58bbd6f2-1fb0-4a42-a45b-e18fef6f7f1c"
-authors = ["UCSD Computational Number Theory"]
 version = "0.1.0"
+authors = ["UCSD Computational Number Theory"]
 
 [deps]
 CSV = "336ed68f-0bac-5ca0-87d4-7b16caf5d00b"
@@ -14,6 +14,10 @@ HTTP = "cd3eb016-35fb-5094-929b-558a96fad6f3"
 JSON = "682c06a0-de6a-54ab-a142-c8b1cf79cde6"
 Oscar = "f1435218-dba5-11e9-1e4d-f1a5fab5fc13"
 Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
+
+[sources]
+DeRham = {path = "../DeRham.jl"}
+GPUFiniteFieldMatrices = {path = "../GPUFiniteFieldMatrices.jl"}
 
 [compat]
 julia = "1.12"

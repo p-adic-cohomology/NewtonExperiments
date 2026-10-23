@@ -40,7 +40,7 @@ Then, press backspace to go back to a julia prompt and run
 include("scripts/setup_deps.jl")
 ```
 
-This script clones `GPUFiniteFieldMatrices.jl` and `DeRham.jl` if needed, develops both local checkouts, and instantiates this project.
+This script locates the sibling checkouts next to the main NewtonExperiments repository, including when NewtonExperiments is opened through a Git worktree. It uses `Pkg.develop` with a path relative to the active checkout, then instantiates the project; the generated `Project.toml` and `Manifest.toml` therefore contain relative paths rather than a developer-specific absolute path. The tracked manifest uses paths relative to the main checkout, and running this script from a linked worktree rewrites them relative to that worktree. If the sibling repositories are stored elsewhere, set `NEWTON_SIBLING_ROOT` to their containing directory before running the script. The script clones either sibling from its GitHub repository if it is missing.
 
 `Revise.jl` is recommended for hot reloading. From a new Julia REPL, run `using Pkg; Pkg.add("Revise")` once, and then run `using Revise` upon opening every new REPL.
 

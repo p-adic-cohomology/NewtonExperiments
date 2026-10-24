@@ -35,13 +35,7 @@ for (directory, package, uuid, url, revision_env) in repos
     end
 
     validate_sibling_project(sibling, package, uuid)
-    if !isempty(expected_revision)
-        actual_revision = strip(read(`git -C $sibling rev-parse HEAD`, String))
-        actual_revision == expected_revision || error(
-            "$package checkout mismatch: $revision_env requests $expected_revision, but $sibling is at $actual_revision",
-        )
-        println("$package pinned to $actual_revision")
-    end
+    validate_sibling_revision(sibling, package, expected_revision, revision_env)
 end
 
 relative_paths = relative_dependency_paths(siblings_root, project_root, repo_directories)

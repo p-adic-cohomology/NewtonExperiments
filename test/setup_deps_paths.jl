@@ -16,6 +16,23 @@ const SETUP_REPO_DIRECTORIES = ["GPUFiniteFieldMatrices.jl", "DeRham.jl"]
     end
 end
 
+@testset "Sibling revision validation" begin
+    mktempdir() do sibling
+        run(`git -C $sibling init --quiet`)
+        run(`git -C $sibling config user.name setup-path-tests`)
+        run(`git -C $sibling config user.email setup-path-tests@example.invalid`)
+        write(joinpath(sibling, "seed.txt"), "seed\n")
+        run(`git -C $sibling add seed.txt`)
+        run(`git -C $sibling commit --quiet -m initial`)
+
+        expected_revision = strip(read(`git -C $sibling rev-parse HEAD`, String))
+        @test validate_sibling_revision(sibling, "ExpectedSibling", expected_revision, "EXPECTED_REV") === nothing
+
+        wrong_revision = string(expected_revision[1] == '0' ? '1' : '0', expected_revision[2:end])
+        @test_throws ErrorException validate_sibling_revision(sibling, "ExpectedSibling", wrong_revision, "EXPECTED_REV")
+    end
+end
+
 @testset "Dependency setup paths" begin
     mktempdir() do temporary_root
         temporary_root = realpath(temporary_root)

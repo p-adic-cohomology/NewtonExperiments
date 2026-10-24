@@ -7,6 +7,17 @@ function validate_sibling_project(sibling, package, uuid)
     return nothing
 end
 
+function validate_sibling_revision(sibling, package, expected_revision, revision_env)
+    isempty(expected_revision) && return nothing
+
+    actual_revision = strip(read(`git -C $sibling rev-parse HEAD`, String))
+    actual_revision == expected_revision || error(
+        "$package checkout mismatch: $revision_env requests $expected_revision, but $sibling is at $actual_revision",
+    )
+    println("$package pinned to $actual_revision")
+    return nothing
+end
+
 function with_project_directory(action, project_root)
     return cd(action, project_root)
 end

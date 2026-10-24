@@ -4,6 +4,18 @@ include(joinpath(@__DIR__, "..", "scripts", "setup_deps_paths.jl"))
 
 const SETUP_REPO_DIRECTORIES = ["GPUFiniteFieldMatrices.jl", "DeRham.jl"]
 
+@testset "Sibling package identity validation" begin
+    mktempdir() do sibling
+        package = "ExpectedSibling"
+        uuid = "12345678-1234-1234-1234-123456789abc"
+        write(joinpath(sibling, "Project.toml"), "name = \"$package\"\nuuid = \"$uuid\"\n")
+
+        @test validate_sibling_project(sibling, package, uuid) === nothing
+        @test_throws ErrorException validate_sibling_project(sibling, "OtherSibling", uuid)
+        @test_throws ErrorException validate_sibling_project(sibling, package, "different-uuid")
+    end
+end
+
 @testset "Dependency setup paths" begin
     mktempdir() do temporary_root
         siblings_root = joinpath(temporary_root, "repositories")
@@ -32,6 +44,11 @@ const SETUP_REPO_DIRECTORIES = ["GPUFiniteFieldMatrices.jl", "DeRham.jl"]
                 expected_paths = joinpath.(Ref(siblings_root), SETUP_REPO_DIRECTORIES)
                 @test resolved_paths == expected_paths
                 @test all(path -> !isabspath(path), relative_paths)
+
+                resolved_from_project = with_project_directory(checkout) do
+                    normpath.(joinpath.(Ref(pwd()), relative_paths))
+                end
+                @test resolved_from_project == expected_paths
             end
         end
 

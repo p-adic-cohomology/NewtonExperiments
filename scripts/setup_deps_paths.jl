@@ -1,3 +1,16 @@
+using TOML
+
+function validate_sibling_project(sibling, package, uuid)
+    package_project = TOML.parsefile(joinpath(sibling, "Project.toml"))
+    get(package_project, "name", nothing) == package || error("Unexpected package in $sibling")
+    get(package_project, "uuid", nothing) == uuid || error("Unexpected UUID for $package in $sibling")
+    return nothing
+end
+
+function with_project_directory(action, project_root)
+    return cd(action, project_root)
+end
+
 function shared_checkout_root(project_root, repo_directories)
     configured = get(ENV, "NEWTON_SIBLING_ROOT", "")
     !isempty(configured) && return abspath(configured)

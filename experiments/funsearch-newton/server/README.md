@@ -28,3 +28,33 @@ If DeRham throws while evaluating a curve, the server independently checks proje
 Run `measure_server.jl` with an optional sample count (minimum 20) to record cold module load, Fermat warm-up latency, median scoring time over random smooth quintics at p=7, peak RSS, and DeRham precision provenance. The script skips singular random samples, aborts on evaluation errors, and does not write to a run's curve log.
 
 For a linked worktree, run `include("scripts/setup_deps.jl")` before the Julia package tests. Restore dependency-path edits to `Project.toml` and `Manifest.toml` before committing.
+
+For an evaluator check without starting a search, use the managed launcher:
+
+~~~sh
+experiments/funsearch-newton/server/run_funsearch.sh check \
+  experiments/funsearch-newton \
+  --instance 'family=plane,d=5,p=7,reward=mixed,beta=0.5,eps=0.01,exclude_ss=true'
+~~~
+
+It starts the resident server, waits for the ready file, runs funsearch check,
+and stops the server. Set FUNSEARCH_BIN to choose the FunSearch CLI,
+FUNSEARCH_PACK to choose its pack directory, PYTHON_BIN to choose Python 3.11+
+(the default is python3.11), and JULIA_BIN to choose Julia or the documented
+per-worktree Julia wrapper. The ready wait defaults to 900 seconds and can be
+changed with FUNSEARCH_NEWTON_START_TIMEOUT_S.
+
+To start a search when authorized, use run instead of check and supply a run id:
+
+~~~sh
+experiments/funsearch-newton/server/run_funsearch.sh run \
+  experiments/funsearch-newton --run-id quintic-p7-baseline \
+  --instance 'family=plane,d=5,p=7,reward=mixed,beta=0.5,eps=0.01,exclude_ss=true'
+~~~
+
+The launcher starts the server before funsearch run start, then uses the run's
+start and finish hooks to move the preflight curve log into the run, retain
+server-ready.json and server.log, and stop the server at completion. The run
+directory is created only by FunSearch; a pending log path under runs/ lets the
+seed preflight be retained without claiming the run id early. The evaluator
+logs its fs_init connection time to worker stderr.

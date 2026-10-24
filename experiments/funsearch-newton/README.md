@@ -42,3 +42,24 @@ Run the offline Python tests from the repository root with:
 ```sh
 python3 -m unittest discover -s test -p 'test_*.py'
 ```
+
+## FunSearch problem
+
+The plane-quintic problem lives in this directory. Its neutral candidate
+contract, default seed, C worker evaluator, and run configuration are in
+problem.md, candidate.h, seed.c, and problem.toml. Alternative seeds are under
+seeds/; copy the selected file to seed.c before a check or run.
+
+Use the managed launcher to check the configured seed against the resident
+server without starting a search:
+
+~~~sh
+experiments/funsearch-newton/server/run_funsearch.sh check \
+  experiments/funsearch-newton \
+  --instance 'family=plane,d=5,p=7,reward=mixed,beta=0.5,eps=0.01,exclude_ss=true'
+~~~
+
+The launcher also has a run mode for an explicitly authorized FunSearch run.
+It waits for server readiness, retains the server's ready record and curve log
+under the run directory, and stops the server when the run finishes. See
+server/README.md for launcher variables and run options.

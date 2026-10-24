@@ -11,6 +11,7 @@ exports = ["curve"]
 [evaluator]
 build = 'make -C evaluator FS_PACK="${FUNSEARCH_PACK:-/Users/Shared/Developer/ai/city/math-city/packs/funsearch}"'
 library = "evaluator/libevaluator.so"
+# Initial per-candidate limits; the run-readiness work finalizes them from measurements.
 timeout_s = 30
 memory_mb = 512
 env = ["FUNSEARCH_NEWTON_SOCKET"]

@@ -176,7 +176,16 @@ def write_table(path: Path, by_prime: dict[int, list[tuple[tuple[Fraction, ...],
 
 def data_directory(requested: Path | None) -> tuple[Path, tempfile.TemporaryDirectory[str] | None]:
     if requested is None:
-        temporary = tempfile.TemporaryDirectory(prefix="newton-polygon-reference-")
+        scratch_parent = Path(tempfile.gettempdir()).resolve()
+        try:
+            scratch_parent.relative_to(REPOSITORY_ROOT)
+        except ValueError:
+            pass
+        else:
+            scratch_parent = REPOSITORY_ROOT.parent
+        temporary = tempfile.TemporaryDirectory(
+            prefix="newton-polygon-reference-", dir=scratch_parent
+        )
         return Path(temporary.name), temporary
 
     resolved = requested.expanduser().resolve()
@@ -226,8 +235,40 @@ def main() -> None:
                 write_table(staged_output, polygons)
                 staged_outputs.append((staged_output, output))
 
-            for staged_output, output in staged_outputs:
-                staged_output.replace(output)
+            backups: dict[Path, Path | None] = {}
+            for _, output in staged_outputs:
+                if output.exists():
+                    backup = staging_dir / f"{output.name}.backup"
+                    shutil.copy2(output, backup)
+                    backups[output] = backup
+                else:
+                    backups[output] = None
+
+            published: list[Path] = []
+            try:
+                for staged_output, output in staged_outputs:
+                    staged_output.replace(output)
+                    published.append(output)
+            except BaseException as publish_error:
+                rollback_errors = []
+                for output in reversed(published):
+                    backup = backups[output]
+                    try:
+                        if backup is None:
+                            output.unlink(missing_ok=True)
+                        else:
+                            backup.replace(output)
+                    except OSError as rollback_error:
+                        rollback_errors.append((output, rollback_error))
+
+                if rollback_errors:
+                    details = "; ".join(
+                        f"{output}: {error}" for output, error in rollback_errors
+                    )
+                    raise RuntimeError(
+                        f"table publication failed ({publish_error}); rollback also failed: {details}"
+                    ) from rollback_errors[0][1]
+                raise
 
         for degree, polygons in tables.items():
             output = args.output_dir / OUTPUT_NAMES[degree]

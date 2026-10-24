@@ -111,6 +111,37 @@ class ReferenceTableTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "checksum mismatch"):
                 rebuild.verified_source_file(Path(directory), source.name, "0" * 32)
 
+    def test_data_directory_rejects_repository_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = Path(directory) / "repository"
+            repository.mkdir()
+            repository = repository.resolve()
+            with patch.object(rebuild, "REPOSITORY_ROOT", repository):
+                with self.assertRaisesRegex(ValueError, "must stay outside the repository"):
+                    rebuild.data_directory(repository / "cache")
+
+    def test_default_data_directory_stays_outside_repository(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository = root / "repository"
+            repository.mkdir()
+            repository = repository.resolve()
+            configured_temp = repository / "configured-temp"
+            configured_temp.mkdir()
+
+            with (
+                patch.object(rebuild, "REPOSITORY_ROOT", repository),
+                patch.object(rebuild.tempfile, "gettempdir", return_value=str(configured_temp)),
+            ):
+                scratch, temporary = rebuild.data_directory(None)
+
+            try:
+                with self.assertRaises(ValueError):
+                    scratch.resolve().relative_to(repository.resolve())
+            finally:
+                self.assertIsNotNone(temporary)
+                temporary.cleanup()
+
     def test_uncached_source_download_verifies_and_cleans_partial_files(self) -> None:
         payload = b"downloaded source contents"
         expected = hashlib.md5(payload).hexdigest()
@@ -170,6 +201,47 @@ class ReferenceTableTests(unittest.TestCase):
                 patch.object(rebuild, "read_distinct_polygons", side_effect=read_polygons),
             ):
                 with self.assertRaisesRegex(ValueError, "sextic validation failed"):
+                    rebuild.main()
+
+            self.assertEqual(quintic.read_bytes(), b"old quintic table")
+            self.assertEqual(sextic.read_bytes(), b"old sextic table")
+
+    def test_main_rolls_back_pair_if_second_output_replace_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            data_dir = root / "cache"
+            output_dir = root / "reference"
+            output_dir.mkdir()
+            quintic = output_dir / rebuild.OUTPUT_NAMES[5]
+            sextic = output_dir / rebuild.OUTPUT_NAMES[6]
+            quintic.write_bytes(b"old quintic table")
+            sextic.write_bytes(b"old sextic table")
+
+            argv = [
+                "rebuild_reference_tables.py",
+                "--data-dir",
+                str(data_dir),
+                "--output-dir",
+                str(output_dir),
+            ]
+            original_replace = Path.replace
+
+            def fail_sextic_replace(source: Path, target: str | Path) -> Path:
+                if Path(target) == sextic:
+                    raise OSError("sextic publication failed")
+                return original_replace(source, target)
+
+            with (
+                patch("sys.argv", argv),
+                patch.object(
+                    rebuild,
+                    "verified_source_file",
+                    side_effect=lambda directory, filename, _checksum: directory / filename,
+                ),
+                patch.object(rebuild, "read_distinct_polygons", return_value={7: []}),
+                patch.object(Path, "replace", fail_sextic_replace),
+            ):
+                with self.assertRaisesRegex(OSError, "sextic publication failed"):
                     rebuild.main()
 
             self.assertEqual(quintic.read_bytes(), b"old quintic table")

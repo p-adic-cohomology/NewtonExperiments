@@ -26,11 +26,20 @@ for (directory, package, uuid, url, revision_env) in repos
         if isempty(expected_revision)
             run(`git clone --depth 1 --branch main $url $sibling`)
         else
-            mkpath(sibling)
-            run(`git -C $sibling init --quiet`)
-            run(`git -C $sibling remote add origin $url`)
-            run(`git -C $sibling fetch --depth 1 origin $expected_revision`)
-            run(`git -C $sibling checkout --detach FETCH_HEAD`)
+            staging_root = mktempdir(siblings_root; prefix=".$directory-")
+            staged_sibling = joinpath(staging_root, directory)
+            try
+                mkpath(staged_sibling)
+                run(`git -C $staged_sibling init --quiet`)
+                run(`git -C $staged_sibling remote add origin $url`)
+                run(`git -C $staged_sibling fetch --depth 1 origin $expected_revision`)
+                run(`git -C $staged_sibling checkout --detach FETCH_HEAD`)
+                validate_sibling_project(staged_sibling, package, uuid)
+                validate_sibling_revision(staged_sibling, package, expected_revision, revision_env)
+                mv(staged_sibling, sibling)
+            finally
+                rm(staging_root; recursive=true, force=true)
+            end
         end
     end
 

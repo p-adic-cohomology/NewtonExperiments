@@ -67,12 +67,36 @@ end
         @test polygon.slopes == [0 // 1, 1 // 2, 1 // 1]
         @test polygon.slopelengths == [2, 2, 2]
         @test NS.integer_values(polygon) == derham_polygon.values
+        @test NS.integer_values(derham_polygon) == derham_polygon.values
         @test NS.polygon_value(polygon, 3) == 1 // 2
         @test NS.to_slopes_polygon(polygon) == derham_polygon
 
         nonintegral = NS.SlopeMultiplicityPolygon([1 // 3, 2 // 3], [1, 1])
         @test NS.is_symmetric(nonintegral)
         @test !NS.has_integral_breakpoints(nonintegral)
+        @test_throws ArgumentError NS.to_slopes_polygon(nonintegral)
+
+        @test_throws ArgumentError NS.SlopeMultiplicityPolygon([1 // 3, 1 // 2], [1])
+        @test_throws ArgumentError NS.SlopeMultiplicityPolygon([0.5], [1])
+        @test_throws ArgumentError NS.SlopeMultiplicityPolygon([-1 // 2], [1])
+        @test_throws ArgumentError NS.SlopeMultiplicityPolygon([2 // 3, 1 // 3], [1, 1])
+        @test_throws ArgumentError NS.SlopeMultiplicityPolygon([1 // 3], [0])
+        @test_throws ArgumentError NS.SlopeMultiplicityPolygon([1 // 3], [true])
+
+        normalized = NS.SlopeMultiplicityPolygon([1 // 3, 1 // 3], [2, 3])
+        @test normalized.slopes == [1 // 3]
+        @test normalized.slopelengths == [5]
+        @test_throws ArgumentError NS.SlopeMultiplicityPolygon([1 // 2, 1 // 2], [typemax(Int), 1])
+
+        protected = NS.SlopeMultiplicityPolygon([0, 1], [2, 2])
+        protected_hash = hash(protected)
+        protected_lookup = Dict(protected => :present)
+        protected.slopes[1] = 1 // 2
+        protected.slopelengths[1] = -1
+        @test protected.slopes == [0 // 1, 1 // 1]
+        @test protected.slopelengths == [2, 2]
+        @test hash(protected) == protected_hash
+        @test protected_lookup[protected] == :present
 
         ordinary = NS.SlopeMultiplicityPolygon([0, 1], [6, 6])
         supersingular = NS.SlopeMultiplicityPolygon([1 // 2], [12])

@@ -10,12 +10,24 @@ export lies_on_or_above, sdim, codim
 export is_ordinary, is_supersingular, p_rank
 export enumerate_symmetric_polygons
 
+function _checked_add_length(total::Int, len::Int)
+    try
+        Base.Checked.checked_add(total, len)
+    catch err
+        err isa OverflowError || rethrow()
+        throw(ArgumentError("total polygon height must fit in Int"))
+    end
+end
+
 """
     SlopeMultiplicityPolygon(slopes, slopelengths)
 
-A convex slope polygon represented by its increasing rational slopes and the
-horizontal length of each slope segment. Adjacent segments with equal slopes
-are combined.
+A convex slope polygon represented by exact rational slopes in nondecreasing
+order and positive integer horizontal lengths. Slopes must be integers or exact
+rationals in `[0, 1]`; the lengths must have the same number of entries as the
+slopes. Adjacent segments with equal slopes are combined, and the total height
+must fit in `Int`. The `slopes` and `slopelengths` properties return copies, so
+mutating a returned vector does not change the polygon.
 """
 struct SlopeMultiplicityPolygon
     slopes::Vector{Rational{Int}}
@@ -29,11 +41,14 @@ struct SlopeMultiplicityPolygon
 
         exact_slopes = Rational{Int}[_exact_rational(slope) for slope in raw_slopes]
         lengths = Int[]
+        total_length = 0
         for len in raw_lengths
             len isa Integer && !(len isa Bool) ||
                 throw(ArgumentError("slopelengths must be positive integers"))
             len > 0 || throw(ArgumentError("slopelengths must be positive integers"))
-            push!(lengths, Int(len))
+            exact_length = Int(len)
+            total_length = _checked_add_length(total_length, exact_length)
+            push!(lengths, exact_length)
         end
 
         all(slope -> 0 <= slope <= 1, exact_slopes) ||
@@ -45,7 +60,7 @@ struct SlopeMultiplicityPolygon
         normalized_lengths = Int[]
         for (slope, len) in zip(exact_slopes, lengths)
             if !isempty(normalized_slopes) && last(normalized_slopes) == slope
-                normalized_lengths[end] += len
+                normalized_lengths[end] = _checked_add_length(normalized_lengths[end], len)
             else
                 push!(normalized_slopes, slope)
                 push!(normalized_lengths, len)
@@ -53,6 +68,16 @@ struct SlopeMultiplicityPolygon
         end
         new(normalized_slopes, normalized_lengths)
     end
+end
+
+@inline _slopes(polygon::SlopeMultiplicityPolygon) = getfield(polygon, :slopes)
+@inline _slopelengths(polygon::SlopeMultiplicityPolygon) = getfield(polygon, :slopelengths)
+
+function Base.getproperty(polygon::SlopeMultiplicityPolygon, name::Symbol)
+    if name === :slopes || name === :slopelengths
+        return copy(getfield(polygon, name))
+    end
+    getfield(polygon, name)
 end
 
 function _exact_rational(value)
@@ -65,16 +90,16 @@ function _exact_rational(value)
 end
 
 Base.:(==)(a::SlopeMultiplicityPolygon, b::SlopeMultiplicityPolygon) =
-    a.slopes == b.slopes && a.slopelengths == b.slopelengths
+    _slopes(a) == _slopes(b) && _slopelengths(a) == _slopelengths(b)
 
 Base.isequal(a::SlopeMultiplicityPolygon, b::SlopeMultiplicityPolygon) =
-    isequal(a.slopes, b.slopes) && isequal(a.slopelengths, b.slopelengths)
+    isequal(_slopes(a), _slopes(b)) && isequal(_slopelengths(a), _slopelengths(b))
 
 Base.hash(polygon::SlopeMultiplicityPolygon, seed::UInt) =
-    hash((polygon.slopes, polygon.slopelengths), seed)
+    hash((_slopes(polygon), _slopelengths(polygon)), seed)
 
 """Return the total horizontal length of a slope polygon."""
-height(polygon::SlopeMultiplicityPolygon) = sum(polygon.slopelengths; init=0)
+height(polygon::SlopeMultiplicityPolygon) = sum(_slopelengths(polygon); init=0)
 
 """Convert a `DeRham.SlopesPolygon` to this module's exact representation."""
 from_slopes_polygon(polygon::DeRham.SlopesPolygon) =
@@ -88,7 +113,7 @@ function to_slopes_polygon(polygon::SlopeMultiplicityPolygon)
     vertices = Tuple{Int64,Int64}[(0, 0)]
     x = 0
     y = 0 // 1
-    for (slope, len) in zip(polygon.slopes, polygon.slopelengths)
+    for (slope, len) in zip(_slopes(polygon), _slopelengths(polygon))
         x += len
         y += slope * len
         push!(vertices, (Int64(x), Int64(numerator(y))))
@@ -106,7 +131,7 @@ function polygon_value(polygon, x::Integer)
 
     remaining = Int(x)
     y = 0 // 1
-    for (slope, len) in zip(p.slopes, p.slopelengths)
+    for (slope, len) in zip(_slopes(p), _slopelengths(p))
         used = min(remaining, len)
         y += slope * used
         remaining -= used
@@ -116,17 +141,33 @@ function polygon_value(polygon, x::Integer)
 end
 
 """Return the exact polygon values at all integer abscissas from zero to the end."""
-integer_values(polygon) = [polygon_value(polygon, x) for x in 0:height(_as_polygon(polygon))]
+function integer_values(polygon)
+    p = _as_polygon(polygon)
+    values = Vector{Rational{Int}}(undef, height(p) + 1)
+    index = 1
+    y = 0 // 1
+    values[index] = y
+    for (slope, len) in zip(_slopes(p), _slopelengths(p))
+        for _ in 1:len
+            y += slope
+            index += 1
+            values[index] = y
+        end
+    end
+    values
+end
 
 """Test the complementary-slope symmetry of a height-`2g` Newton polygon."""
 function is_symmetric(polygon)
     p = _as_polygon(polygon)
     iseven(height(p)) || return false
-    n = length(p.slopes)
+    slopes = _slopes(p)
+    lengths = _slopelengths(p)
+    n = length(slopes)
     for i in 1:n
         j = n - i + 1
-        p.slopes[i] + p.slopes[j] == 1 // 1 || return false
-        p.slopelengths[i] == p.slopelengths[j] || return false
+        slopes[i] + slopes[j] == 1 // 1 || return false
+        lengths[i] == lengths[j] || return false
     end
     true
 end
@@ -135,7 +176,7 @@ end
 function has_integral_breakpoints(polygon)
     p = _as_polygon(polygon)
     y = 0 // 1
-    for (slope, len) in zip(p.slopes, p.slopelengths)
+    for (slope, len) in zip(_slopes(p), _slopelengths(p))
         y += slope * len
         denominator(y) == 1 || return false
     end
@@ -150,8 +191,41 @@ is_valid_symmetric_polygon(polygon) =
 function lies_on_or_above(upper, lower)
     a = _as_polygon(upper)
     b = _as_polygon(lower)
-    height(a) == height(b) || return false
-    all(x -> polygon_value(a, x) >= polygon_value(b, x), 0:height(a))
+    total_height = height(a)
+    total_height == height(b) || return false
+    total_height == 0 && return true
+
+    slopes_a = _slopes(a)
+    lengths_a = _slopelengths(a)
+    slopes_b = _slopes(b)
+    lengths_b = _slopelengths(b)
+    i = 1
+    j = 1
+    remaining_a = lengths_a[i]
+    remaining_b = lengths_b[j]
+    x = 0
+    y_a = 0 // 1
+    y_b = 0 // 1
+
+    while x < total_height
+        step = min(remaining_a, remaining_b)
+        y_a += slopes_a[i] * step
+        y_b += slopes_b[j] * step
+        x += step
+        y_a >= y_b || return false
+
+        remaining_a -= step
+        remaining_b -= step
+        if remaining_a == 0 && x < total_height
+            i += 1
+            remaining_a = lengths_a[i]
+        end
+        if remaining_b == 0 && x < total_height
+            j += 1
+            remaining_b = lengths_b[j]
+        end
+    end
+    true
 end
 
 function _require_integral_symmetric(polygon)
@@ -179,7 +253,7 @@ end
 """Return the multiplicity of slope zero."""
 function p_rank(polygon)
     p = _as_polygon(polygon)
-    sum((len for (slope, len) in zip(p.slopes, p.slopelengths) if iszero(slope)); init=0)
+    sum((len for (slope, len) in zip(_slopes(p), _slopelengths(p)) if iszero(slope)); init=0)
 end
 
 """Test whether the polygon is ordinary, with `g` zero and `g` unit slopes."""
@@ -187,14 +261,14 @@ function is_ordinary(polygon)
     p = _as_polygon(polygon)
     is_valid_symmetric_polygon(p) || return false
     g = height(p) ÷ 2
-    p_rank(p) == g && all(slope -> slope == 0 // 1 || slope == 1 // 1, p.slopes)
+    p_rank(p) == g && all(slope -> slope == 0 // 1 || slope == 1 // 1, _slopes(p))
 end
 
 """Test whether every slope is one half (the supersingular polygon)."""
 function is_supersingular(polygon)
     p = _as_polygon(polygon)
     height(p) > 0 && is_valid_symmetric_polygon(p) &&
-        all(==(1 // 2), p.slopes)
+        all(==(1 // 2), _slopes(p))
 end
 
 """Enumerate all symmetric height-`2g` Newton polygons with integral vertices."""

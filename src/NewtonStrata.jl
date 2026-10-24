@@ -241,14 +241,32 @@ function _require_integral_symmetric(polygon)
     polygon
 end
 
-"""Compute Oort's `sdim` lattice-point count for a symmetric Newton polygon."""
+"""
+Compute Oort's `sdim` lattice-point count for a complementary-slope symmetric
+Newton polygon with integral breakpoints.
+"""
 function sdim(polygon)
     p = _require_integral_symmetric(_as_polygon(polygon))
     g = height(p) ÷ 2
-    sum((x - ceil(Int, polygon_value(p, x)) for x in 1:g); init=0)
+    dimension = 0
+    x = 0
+    y = 0 // 1
+    for (slope, len) in zip(_slopes(p), _slopelengths(p))
+        steps = min(len, g - x)
+        for _ in 1:steps
+            x += 1
+            y += slope
+            dimension += x - ceil(Int, y)
+        end
+        x == g && break
+    end
+    dimension
 end
 
-"""Compute the codimension of the Newton stratum in `A_g` by Oort's formula."""
+"""
+Compute the codimension of the Newton stratum in `A_g` by Oort's formula for a
+complementary-slope symmetric polygon with integral breakpoints.
+"""
 function codim(polygon)
     p = _require_integral_symmetric(_as_polygon(polygon))
     g = height(p) ÷ 2

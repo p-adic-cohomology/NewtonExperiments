@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import csv
 import hashlib
+import os
 import shutil
 import tempfile
 from collections import defaultdict
@@ -55,18 +56,22 @@ def verified_source_file(data_dir: Path, filename: str, expected_md5: str) -> Pa
     if not path.exists():
         url = f"https://zenodo.org/api/records/{RECORD_ID}/files/{filename}/content"
         request = Request(url, headers={"User-Agent": "NewtonExperiments-reference-rebuilder/1.0"})
-        partial = path.with_suffix(path.suffix + ".part")
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{path.name}.", suffix=".part", dir=data_dir
+        )
+        temporary = Path(temporary_name)
         try:
-            with urlopen(request, timeout=120) as response, partial.open("wb") as destination:
-                shutil.copyfileobj(response, destination)
-            actual_md5 = md5(partial)
+            with os.fdopen(descriptor, "wb") as destination:
+                with urlopen(request, timeout=120) as response:
+                    shutil.copyfileobj(response, destination)
+            actual_md5 = md5(temporary)
             if actual_md5 != expected_md5:
                 raise ValueError(
                     f"checksum mismatch for {filename}: expected {expected_md5}, got {actual_md5}"
                 )
-            partial.replace(path)
+            os.replace(temporary, path)
         finally:
-            partial.unlink(missing_ok=True)
+            temporary.unlink(missing_ok=True)
 
     actual_md5 = md5(path)
     if actual_md5 != expected_md5:

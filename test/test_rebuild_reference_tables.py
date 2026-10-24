@@ -167,6 +167,28 @@ class ReferenceTableTests(unittest.TestCase):
 
             self.assertFalse((data_dir / "source.csv").exists())
             self.assertFalse((data_dir / "source.csv.part").exists())
+            self.assertEqual(list(data_dir.glob(".source.csv.*.part")), [])
+
+    def test_uncached_download_does_not_follow_preexisting_partial_symlink(self) -> None:
+        payload = b"downloaded source contents"
+        expected = hashlib.md5(payload).hexdigest()
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            data_dir = root / "cache"
+            data_dir.mkdir()
+            target = root / "sentinel.txt"
+            target.write_bytes(b"keep this file unchanged")
+            partial = data_dir / "source.csv.part"
+            partial.symlink_to(target)
+
+            with patch.object(rebuild, "urlopen", return_value=io.BytesIO(payload)):
+                source = rebuild.verified_source_file(data_dir, "source.csv", expected)
+
+            self.assertEqual(source.read_bytes(), payload)
+            self.assertTrue(partial.is_symlink())
+            self.assertEqual(target.read_bytes(), b"keep this file unchanged")
+            self.assertEqual(list(data_dir.glob(".source.csv.*.part")), [])
 
     def test_main_validates_all_sources_before_replacing_any_output(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

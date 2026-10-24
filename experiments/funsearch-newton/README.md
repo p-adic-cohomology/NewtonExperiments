@@ -26,8 +26,12 @@ the repository:
 
 ```sh
 python3 experiments/funsearch-newton/rebuild_reference_tables.py \
-  --data-dir /tmp/newton-polygon-source
+  --data-dir /tmp/newton-polygon-source \
+  --output-dir /tmp/newton-polygon-reference
 ```
+
+Generated tables go to `experiments/funsearch-newton/reference` by default;
+`--output-dir` selects a different destination for them.
 
 The script verifies both source checksums and pinned distinct-polygon counts, then
 stages both tables before replacing either output. A failed download or

@@ -1,6 +1,8 @@
 module FunSearchNewtonServer
 
 const LOAD_STARTED_NS = time_ns()
+const MAX_REQUEST_BYTES = 64 * 1024
+const MAX_ACTIVE_CLIENTS = 64
 
 using Dates
 using DeRham
@@ -150,7 +152,7 @@ function _build_curve(p::Int, coefficients::Vector{Int})
 end
 
 function _score_details(instance, coefficients)
-    raw_coefficients = coefficients isa AbstractVector ? collect(coefficients) : nothing
+    raw_coefficients = coefficients isa AbstractVector ? coefficients : nothing
     config = try
         _parse_instance(instance)
     catch error
@@ -299,9 +301,38 @@ struct PendingRequest
     reply::Channel{Dict{String,Any}}
 end
 
+function _read_request_line(connection, max_bytes::Int=MAX_REQUEST_BYTES)
+    bytes = UInt8[]
+    sizehint!(bytes, min(max_bytes, 4096))
+    while true
+        byte = try
+            read(connection, UInt8)
+        catch error
+            error isa EOFError || rethrow()
+            return isempty(bytes) ? nothing : String(bytes)
+        end
+        byte == 0x0a && return String(bytes)
+        length(bytes) == max_bytes && return :too_large
+        push!(bytes, byte)
+    end
+end
+
 function _client_loop(connection, request_queue)
     try
-        for line in eachline(connection)
+        while true
+            line = _read_request_line(connection)
+            line === nothing && break
+            if line === :too_large
+                write(connection, JSON.json(Dict{String,Any}(
+                    "status" => "ERROR",
+                    "score" => 0.0,
+                    "sig" => Float64[],
+                    "msg" => "request line exceeds the $(MAX_REQUEST_BYTES)-byte limit",
+                )))
+                write(connection, '\n')
+                flush(connection)
+                break
+            end
             isempty(strip(line)) && continue
             reply = Channel{Dict{String,Any}}(1)
             try
@@ -321,7 +352,7 @@ function _client_loop(connection, request_queue)
     nothing
 end
 
-function _accept_loop(listener, request_queue)
+function _accept_loop(listener, request_queue, client_slots, client_connections, clients_lock)
     while isopen(listener)
         connection = try
             accept(listener)
@@ -329,7 +360,37 @@ function _accept_loop(listener, request_queue)
             isopen(listener) && rethrow()
             break
         end
-        @async _client_loop(connection, request_queue)
+        if !isready(client_slots)
+            close(connection)
+            continue
+        end
+        take!(client_slots)
+        lock(clients_lock) do
+            push!(client_connections, connection)
+        end
+        @async begin
+            try
+                _client_loop(connection, request_queue)
+            finally
+                lock(clients_lock) do
+                    delete!(client_connections, connection)
+                end
+                put!(client_slots, nothing)
+            end
+        end
+    end
+    nothing
+end
+
+function _close_client_connections(client_connections, clients_lock)
+    connections = lock(clients_lock) do
+        collect(client_connections)
+    end
+    for connection in connections
+        try
+            close(connection)
+        catch
+        end
     end
     nothing
 end
@@ -407,23 +468,60 @@ function start_server(socket_path::AbstractString, ready_path::AbstractString, c
     warmup_seconds = (time_ns() - warmup_started_ns) / 1.0e9
     warmup_response["status"] == "OK" || throw(ErrorException("built-in warm-up curve failed: $(warmup_response["msg"])"))
     precision = _precision_provenance()
+    ready_record = _ready_record(warmup_seconds, warmup_response, precision)
     mkpath(dirname(abspath(socket_path)))
     mkpath(dirname(abspath(ready_path)))
     listener = Sockets.listen(socket_path)
     request_queue = Channel{PendingRequest}(32)
-    accept_task = @async _accept_loop(listener, request_queue)
-    process_task = @async _process_loop(request_queue, curves_path)
-    ready_record = _ready_record(warmup_seconds, warmup_response, precision)
-    open(ready_path, "w") do output
-        write(output, JSON.json(ready_record))
-        write(output, '\n')
-        flush(output)
+    client_slots = Channel{Nothing}(MAX_ACTIVE_CLIENTS)
+    for _ in 1:MAX_ACTIVE_CLIENTS
+        put!(client_slots, nothing)
+    end
+    client_connections = Set{Any}()
+    clients_lock = ReentrantLock()
+    accept_task = nothing
+    process_task = nothing
+    try
+        chmod(socket_path, 0o600)
+        accept_task = @async _accept_loop(listener, request_queue, client_slots, client_connections, clients_lock)
+        process_task = @async _process_loop(request_queue, curves_path)
+        open(ready_path, "w") do output
+            write(output, JSON.json(ready_record))
+            write(output, '\n')
+            flush(output)
+        end
+    catch
+        isopen(listener) && close(listener)
+        if accept_task !== nothing
+            try
+                wait(accept_task)
+            catch
+            end
+        end
+        _close_client_connections(client_connections, clients_lock)
+        isopen(request_queue) && close(request_queue)
+        if process_task !== nothing
+            try
+                wait(process_task)
+            catch
+            end
+        end
+        for _ in 1:MAX_ACTIVE_CLIENTS
+            take!(client_slots)
+        end
+        rm(socket_path; force=true)
+        rm(ready_path; force=true)
+        rethrow()
     end
     (
         listener=listener,
         request_queue=request_queue,
         accept_task=accept_task,
         process_task=process_task,
+        client_slots=client_slots,
+        client_connections=client_connections,
+        clients_lock=clients_lock,
+        client_slots_drained=Ref(false),
         socket_path=String(socket_path),
         ready_path=String(ready_path),
         ready_record=ready_record,
@@ -432,12 +530,21 @@ end
 
 function stop_server(server)
     isopen(server.listener) && close(server.listener)
+    try
+        wait(server.accept_task)
+    catch
+    end
+    _close_client_connections(server.client_connections, server.clients_lock)
     isopen(server.request_queue) && close(server.request_queue)
-    for task in (server.accept_task, server.process_task)
-        try
-            wait(task)
-        catch
+    try
+        wait(server.process_task)
+    catch
+    end
+    if !server.client_slots_drained[]
+        for _ in 1:MAX_ACTIVE_CLIENTS
+            take!(server.client_slots)
         end
+        server.client_slots_drained[] = true
     end
     rm(server.socket_path; force=true)
     rm(server.ready_path; force=true)

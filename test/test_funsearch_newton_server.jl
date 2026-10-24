@@ -7,7 +7,7 @@ using Sockets
 @testset "FunSearch Newton score server" begin
     server_module = FunSearchNewtonServer
     fermat = server_module.FERMAT_COEFFICIENTS
-    instance(p, extra="") = "family=plane,d=5,p=$p,reward=mixed,beta=0.5,eps=0.01,exclude_ss=true$extra"
+    instance(p; exclude_ss=true) = "family=plane,d=5,p=$p,reward=mixed,beta=0.5,eps=0.01,exclude_ss=$exclude_ss"
 
     @test length(server_module.MONOMIAL_EXPONENTS) == 21
     @test [collect(exponent) for exponent in server_module.MONOMIAL_EXPONENTS] == DeRham.gen_exp_vec(3, 5, :lex)
@@ -60,6 +60,11 @@ using Sockets
         @test server_module._reward_score(12, true, mixed; supersingular_excluded=true) == 0.0
     end
 
+    @testset "Bounded request lines" begin
+        @test server_module._read_request_line(IOBuffer("{}\n")) == "{}"
+        @test server_module._read_request_line(IOBuffer("x"^(server_module.MAX_REQUEST_BYTES + 1))) == :too_large
+    end
+
     @testset "Unix socket round trip and append-only retention" begin
         mktempdir() do directory
             socket_path = joinpath(directory, "score.sock")
@@ -74,6 +79,7 @@ using Sockets
                 @test ready["precision_provenance"]["path"] == "table"
                 @test ready["precision_provenance"]["N_m"] == [4, 4]
                 @test ready["DeRham_commit"] == "59b331b818aaa7f169a33c42e600cbc6de9044f7"
+                @test (stat(socket_path).mode & 0o777) == 0o600
 
                 connection = Sockets.connect(socket_path)
                 request = Dict(
@@ -88,9 +94,25 @@ using Sockets
                 close(connection)
 
                 @test response["status"] == "INVALID"
+
+                positive_connection = Sockets.connect(socket_path)
+                positive_request = Dict(
+                    "program_id" => "positive-score-program",
+                    "instance" => instance(7; exclude_ss=false),
+                    "coeffs" => fermat,
+                )
+                write(positive_connection, JSON.json(positive_request))
+                write(positive_connection, '\n')
+                flush(positive_connection)
+                positive_response = JSON.parse(readline(positive_connection))
+                close(positive_connection)
+
+                @test positive_response["status"] == "OK"
+                @test positive_response["score"] > 0.0
+                @test positive_response["sig"] == [0.5, 1.0, 1.5, 2.0, 2.5, 3.0]
                 rows = readlines(curves_path)
                 @test rows[1] == "existing-run-line"
-                @test length(rows) == 2
+                @test length(rows) == 3
                 record = JSON.parse(rows[2])
                 @test record["program_id"] == "unit-test-program"
                 @test record["p"] == 7
@@ -99,6 +121,11 @@ using Sockets
                 @test record["reward"] == 0.0
                 @test record["wall_time_seconds"] >= 0.0
                 @test endswith(record["timestamp"], "Z")
+                positive_record = JSON.parse(rows[3])
+                @test positive_record["program_id"] == "positive-score-program"
+                @test positive_record["status"] == "OK"
+                @test positive_record["codim"] > 0
+                @test positive_record["reward"] > 0.0
             finally
                 server_module.stop_server(server)
             end

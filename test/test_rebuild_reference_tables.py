@@ -70,6 +70,16 @@ class ReferenceTableTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, message):
                     rebuild.validate_polygon(slopes, lengths, values, "fixture.csv", 2)
 
+    def test_validate_polygon_rejects_decreasing_slopes(self) -> None:
+        with self.assertRaisesRegex(ValueError, "slopes must be non-decreasing"):
+            rebuild.validate_polygon(
+                (Fraction(1), Fraction(0)),
+                (1, 1),
+                (Fraction(0), Fraction(1), Fraction(1)),
+                "fixture.csv",
+                2,
+            )
+
     def test_read_distinct_polygons_rejects_non_integral_slope_lengths(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "fixture.csv"
@@ -257,6 +267,7 @@ class ReferenceTableTests(unittest.TestCase):
             with (
                 patch("sys.argv", argv),
                 patch.object(rebuild, "verified_source_file", side_effect=fail_sextic_download),
+                patch.object(rebuild, "read_distinct_polygons", return_value={7: []}),
             ):
                 with self.assertRaisesRegex(OSError, "sextic download failed"):
                     rebuild.main()

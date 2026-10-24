@@ -108,6 +108,8 @@ def validate_polygon(
     where = f"{filename}:{row_number}"
     if not slopes or len(slopes) != len(lengths):
         raise ValueError(f"{where}: slopes and lengths must be non-empty parallel vectors")
+    if any(left > right for left, right in zip(slopes, slopes[1:])):
+        raise ValueError(f"{where}: Newton polygon slopes must be non-decreasing")
     if any(length <= 0 for length in lengths):
         raise ValueError(f"{where}: slope lengths must be positive")
     if len(values) != sum(lengths) + 1:

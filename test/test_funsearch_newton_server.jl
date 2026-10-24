@@ -201,7 +201,9 @@ using Sockets
                 @test ready["status"] == "ready"
                 @test ready["precision_provenance"]["path"] == "table"
                 @test ready["precision_provenance"]["N_m"] == [4, 4]
-                @test ready["DeRham_commit"] == "59b331b818aaa7f169a33c42e600cbc6de9044f7"
+                derham_root = dirname(dirname(pathof(DeRham)))
+                loaded_derham_commit = strip(read(`git -C $derham_root rev-parse HEAD`, String))
+                @test ready["DeRham_commit"] == loaded_derham_commit
                 @test (stat(socket_path).mode & 0o777) == 0o600
 
                 connection = Sockets.connect(socket_path)

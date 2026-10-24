@@ -4,8 +4,8 @@ project_root = normpath(joinpath(@__DIR__, ".."))
 Pkg.activate(project_root; io=devnull)
 
 repos = [
-    ("GPUFiniteFieldMatrices.jl", "GPUFiniteFieldMatrices", "465031f1-b347-4f72-85f6-baf667cdf853", "https://github.com/UCSD-computational-number-theory/GPUFiniteFieldMatrices.jl.git"),
-    ("DeRham.jl", "DeRham", "0ea6bb9e-09b2-4dc0-b975-f97753fde228", "https://github.com/UCSD-computational-number-theory/DeRham.jl.git"),
+    ("GPUFiniteFieldMatrices.jl", "GPUFiniteFieldMatrices", "465031f1-b347-4f72-85f6-baf667cdf853", "https://github.com/UCSD-computational-number-theory/GPUFiniteFieldMatrices.jl.git", "NEWTON_GPUFFM_REV"),
+    ("DeRham.jl", "DeRham", "0ea6bb9e-09b2-4dc0-b975-f97753fde228", "https://github.com/UCSD-computational-number-theory/DeRham.jl.git", "NEWTON_DERHAM_REV"),
 ]
 
 include(joinpath(@__DIR__, "setup_deps_paths.jl"))
@@ -14,13 +14,34 @@ repo_directories = first.(repos)
 siblings_root = shared_checkout_root(project_root, repo_directories)
 mkpath(siblings_root)
 
-for (directory, package, uuid, url) in repos
+for (directory, package, uuid, url, revision_env) in repos
     sibling = joinpath(siblings_root, directory)
+    expected_revision = lowercase(strip(get(ENV, revision_env, "")))
+    if !isempty(expected_revision)
+        occursin(r"^[0-9a-f]{40}$", expected_revision) ||
+            error("$revision_env must be a full 40-character commit SHA, got: $expected_revision")
+    end
+
     if !isdir(sibling)
-        run(`git clone --depth 1 --branch main $url $sibling`)
+        if isempty(expected_revision)
+            run(`git clone --depth 1 --branch main $url $sibling`)
+        else
+            mkpath(sibling)
+            run(`git -C $sibling init --quiet`)
+            run(`git -C $sibling remote add origin $url`)
+            run(`git -C $sibling fetch --depth 1 origin $expected_revision`)
+            run(`git -C $sibling checkout --detach FETCH_HEAD`)
+        end
     end
 
     validate_sibling_project(sibling, package, uuid)
+    if !isempty(expected_revision)
+        actual_revision = strip(read(`git -C $sibling rev-parse HEAD`, String))
+        actual_revision == expected_revision || error(
+            "$package checkout mismatch: $revision_env requests $expected_revision, but $sibling is at $actual_revision",
+        )
+        println("$package pinned to $actual_revision")
+    end
 end
 
 relative_paths = relative_dependency_paths(siblings_root, project_root, repo_directories)

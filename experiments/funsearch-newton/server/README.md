@@ -29,6 +29,8 @@ Run `measure_server.jl` with an optional sample count (minimum 20) to record col
 
 For a linked worktree, run `include("scripts/setup_deps.jl")` before the Julia package tests. Restore dependency-path edits to `Project.toml` and `Manifest.toml` before committing.
 
+CI sets `NEWTON_DERHAM_REV` and `NEWTON_GPUFFM_REV` to full commit SHAs before running `setup_deps.jl`. The script fetches those exact revisions when it creates sibling checkouts and fails if an existing checkout does not match. The CI pins are DeRham `59b331b818aaa7f169a33c42e600cbc6de9044f7` and GPUFiniteFieldMatrices `2ee57eb63147e620e395e20fcd08e21400b942eb`. Local acceptance evidence used GPUFiniteFieldMatrices commit `aec266ff4517e5a611b9d90fc71c44a2ca3a96cd`, a local metadata-only child of the public `2ee57eb` commit; the product source and project files are identical. The server provenance test independently checks that the ready file reports the revision of the loaded DeRham checkout.
+
 For an evaluator check without starting a search, use the managed launcher:
 
 ~~~sh

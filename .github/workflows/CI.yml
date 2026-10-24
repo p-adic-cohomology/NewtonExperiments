@@ -40,6 +40,9 @@ jobs:
 
       - name: Clone and develop local dependencies
         shell: bash
+        env:
+          NEWTON_GPUFFM_REV: 2ee57eb63147e620e395e20fcd08e21400b942eb
+          NEWTON_DERHAM_REV: 59b331b818aaa7f169a33c42e600cbc6de9044f7
         run: |
           julia --project=. scripts/setup_deps.jl
 

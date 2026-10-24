@@ -176,3 +176,5 @@ end
         end
     end
 end
+
+include("test_funsearch_newton_server.jl")

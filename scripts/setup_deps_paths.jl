@@ -1,10 +1,22 @@
+using TOML
+
+function validate_sibling_project(sibling, package, uuid)
+    package_project = TOML.parsefile(joinpath(sibling, "Project.toml"))
+    get(package_project, "name", nothing) == package || error("Unexpected package in $sibling")
+    get(package_project, "uuid", nothing) == uuid || error("Unexpected UUID for $package in $sibling")
+    return nothing
+end
+
+function with_project_directory(action, project_root)
+    return cd(action, project_root)
+end
+
 function shared_checkout_root(project_root, repo_directories)
     configured = get(ENV, "NEWTON_SIBLING_ROOT", "")
     !isempty(configured) && return abspath(configured)
 
     common_git_dir = try
-        command = Cmd(["git", "-C", project_root, "rev-parse", "--git-common-dir"])
-        strip(read(pipeline(command, stderr=devnull), String))
+        strip(read(pipeline(`git -C $project_root rev-parse --git-common-dir`, stderr=devnull), String))
     catch
         ""
     end
@@ -21,8 +33,4 @@ end
 
 function relative_dependency_paths(siblings_root, project_root, repo_directories)
     return [relpath(joinpath(siblings_root, directory), project_root) for directory in repo_directories]
-end
-
-function with_project_directory(action, project_root)
-    return cd(action, project_root)
 end

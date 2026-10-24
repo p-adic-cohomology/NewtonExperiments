@@ -1,5 +1,4 @@
 using Pkg
-using TOML
 
 project_root = normpath(joinpath(@__DIR__, ".."))
 Pkg.activate(project_root; io=devnull)
@@ -21,9 +20,7 @@ for (directory, package, uuid, url) in repos
         run(`git clone --depth 1 --branch main $url $sibling`)
     end
 
-    package_project = TOML.parsefile(joinpath(sibling, "Project.toml"))
-    get(package_project, "name", nothing) == package || error("Unexpected package in $sibling")
-    get(package_project, "uuid", nothing) == uuid || error("Unexpected UUID for $package in $sibling")
+    validate_sibling_project(sibling, package, uuid)
 end
 
 relative_paths = relative_dependency_paths(siblings_root, project_root, repo_directories)

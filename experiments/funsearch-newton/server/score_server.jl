@@ -86,6 +86,8 @@ function _parse_instance(instance)
         length(pair) == 2 || throw(ArgumentError("invalid instance field: $item"))
         key, value = strip.(pair)
         isempty(key) && throw(ArgumentError("instance field name is empty"))
+        key in ("family", "d", "p", "reward", "beta", "eps", "exclude_ss") ||
+            throw(ArgumentError("unknown instance field: $key"))
         haskey(fields, key) && throw(ArgumentError("duplicate instance field: $key"))
         fields[key] = value
     end

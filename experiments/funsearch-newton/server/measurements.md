@@ -1,6 +1,6 @@
 # Server measurements
 
-Measured on Julia 1.13.2 with DeRham 59b331b818aaa7f169a33c42e600cbc6de9044f7. Load time covers the server module imports and reference-table load. Warm-up latency is the first Fermat quintic p=7 score. Steady time is the median score time over 20 random smooth quintics at p=7; singular samples were skipped.
+Measured on Julia 1.13.2 with DeRham 59b331b818aaa7f169a33c42e600cbc6de9044f7. Load time covers the server module imports and reference-table load. Warm-up latency is the first Fermat quintic p=7 score. Steady time is the median score time over 20 random smooth quintics at p=7; singular samples were skipped, and evaluation errors abort the measurement.
 
 | Runtime | Module load | First-call warm-up | Median steady p=7 | Peak RSS |
 | --- | ---: | ---: | ---: | ---: |

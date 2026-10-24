@@ -1,4 +1,5 @@
 include(joinpath(@__DIR__, "..", "experiments", "funsearch-newton", "server", "score_server.jl"))
+include(joinpath(@__DIR__, "..", "experiments", "funsearch-newton", "server", "measure_server.jl"))
 
 using .FunSearchNewtonServer
 using JSON
@@ -55,6 +56,7 @@ using Sockets
         invalid_instances = [
             ("family=plane,d=5,p=7,broken", "invalid instance field"),
             ("family=plane,d=5,p=7,p=11", "duplicate instance field"),
+            ("family=plane,d=5,p=7,rewrd=depth", "unknown instance field: rewrd"),
             ("family=affine,d=5,p=7", "only family=plane is supported"),
             ("family=plane,d=4,p=7", "only degree d=5 is supported"),
             ("family=plane,d=5,p=7,reward=unknown", "unknown reward mode"),
@@ -69,6 +71,27 @@ using Sockets
             @test response["status"] == "INVALID"
             @test occursin(expected_message, response["msg"])
         end
+
+        for invalid_coefficient in (true, 1.5, "1")
+            coefficients = Any[fermat...]
+            coefficients[1] = invalid_coefficient
+            response = score_instance(instance(7), coefficients)
+            @test response["status"] == "INVALID"
+            @test occursin("only integers", response["msg"])
+        end
+    end
+
+    @testset "Measurement sample handling" begin
+        elapsed = Float64[]
+        @test _record_measurement_sample!(elapsed, Dict("status" => "OK"), 0.25)
+        @test elapsed == [0.25]
+        @test !_record_measurement_sample!(elapsed, Dict("status" => "INVALID"), 0.5)
+        @test elapsed == [0.25]
+        @test_throws ErrorException _record_measurement_sample!(
+            elapsed, Dict("status" => "ERROR", "msg" => "injected evaluation failure"), 0.75,
+        )
+        @test_throws ErrorException _record_measurement_sample!(elapsed, Dict("status" => "UNKNOWN"), 1.0)
+        @test elapsed == [0.25]
     end
 
     @testset "Unexpected curve-construction failures" begin
@@ -231,6 +254,36 @@ using Sockets
             end
             @test !ispath(socket_path)
             @test !ispath(ready_path)
+        end
+    end
+
+    @testset "Multiple requests on one socket connection" begin
+        mktempdir() do directory
+            socket_path = joinpath(directory, "score.sock")
+            ready_path = joinpath(directory, "ready.json")
+            curves_path = joinpath(directory, "curves.jsonl")
+            server = server_module.start_server(socket_path, ready_path, curves_path)
+            connection = Sockets.connect(socket_path)
+            requests = [
+                Dict("program_id" => "persistent-1", "instance" => instance(7; exclude_ss=false), "coeffs" => fermat),
+                Dict("program_id" => "persistent-2", "instance" => instance(11; exclude_ss=false), "coeffs" => fermat),
+            ]
+            try
+                for request in requests
+                    write(connection, JSON.json(request))
+                    write(connection, '\n')
+                end
+                flush(connection)
+                responses = [JSON.parse(readline(connection)) for _ in requests]
+                @test [response["status"] for response in responses] == ["OK", "OK"]
+            finally
+                close(connection)
+                server_module.stop_server(server)
+            end
+
+            rows = JSON.parse.(readlines(curves_path))
+            @test [row["program_id"] for row in rows] == ["persistent-1", "persistent-2"]
+            @test [row["status"] for row in rows] == ["OK", "OK"]
         end
     end
 

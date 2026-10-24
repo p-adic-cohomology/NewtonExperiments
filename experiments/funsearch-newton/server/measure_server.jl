@@ -1,4 +1,6 @@
-include("score_server.jl")
+if !isdefined(@__MODULE__, :FunSearchNewtonServer)
+    include("score_server.jl")
+end
 
 using .FunSearchNewtonServer
 using DeRham
@@ -24,6 +26,20 @@ function _kaimon_progress(message)
     nothing
 end
 
+function _record_measurement_sample!(elapsed, response, seconds)
+    status = get(response, "status", nothing)
+    if status == "OK"
+        push!(elapsed, seconds)
+        return true
+    elseif status == "INVALID"
+        return false
+    elseif status == "ERROR"
+        message = get(response, "msg", "unknown evaluation error")
+        throw(ErrorException("evaluation failed during measurement: $message"))
+    end
+    throw(ErrorException("unexpected score response status during measurement: $(repr(status))"))
+end
+
 function _measure(samples)
     samples >= 20 || throw(ArgumentError("at least 20 smooth curves are required"))
     Random.seed!(20261024)
@@ -46,7 +62,7 @@ function _measure(samples)
         started_ns = time_ns()
         response = FunSearchNewtonServer.score_instance(instance, coefficients)
         seconds = (time_ns() - started_ns) / 1.0e9
-        response["status"] == "OK" && push!(elapsed, seconds)
+        _record_measurement_sample!(elapsed, response, seconds)
         if length(elapsed) >= last_reported + 5
             last_reported = length(elapsed)
             _kaimon_progress("measured $last_reported/$samples smooth p=7 curves")

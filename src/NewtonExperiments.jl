@@ -10,6 +10,9 @@ using JSON
 using Oscar
 using Random
 
+include("NewtonStrata.jl")
+
+export NewtonStrata
 export SupabaseClient
 export headers, push_row, fetch_table, add_heights_patch!
 export empty_results_dataframe, update_results!, update_df

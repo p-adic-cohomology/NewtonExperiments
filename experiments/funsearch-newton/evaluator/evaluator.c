@@ -25,6 +25,8 @@ typedef void (*curve_fn)(int32_t, int32_t[21]);
 static pthread_mutex_t state_lock = PTHREAD_MUTEX_INITIALIZER;
 static int server_fd = -1;
 static char server_socket_path[sizeof(((struct sockaddr_un *)0)->sun_path)];
+static char response_buffer[RESPONSE_BYTES];
+static size_t response_buffer_used;
 
 static void set_message(fs_result *result, const char *message)
 {
@@ -47,6 +49,7 @@ static void close_server_locked(void)
     if (server_fd >= 0)
         close(server_fd);
     server_fd = -1;
+    response_buffer_used = 0;
 }
 
 static int load_socket_path(const char *path, char *message, size_t message_size)
@@ -231,21 +234,33 @@ static int send_all(int fd, const char *bytes, size_t length)
 
 static int read_response_line(int fd, char *output, size_t capacity)
 {
-    size_t used = 0;
-    while (used + 1 < capacity) {
-        char byte;
-        ssize_t count = recv(fd, &byte, 1, 0);
+    if (capacity == 0)
+        return -1;
+
+    for (;;) {
+        char *newline = memchr(response_buffer, '\n', response_buffer_used);
+        if (newline != NULL) {
+            size_t line_length = (size_t)(newline - response_buffer);
+            if (line_length >= capacity)
+                return -1;
+            memcpy(output, response_buffer, line_length);
+            output[line_length] = '\0';
+            size_t remaining = response_buffer_used - line_length - 1;
+            memmove(response_buffer, newline + 1, remaining);
+            response_buffer_used = remaining;
+            return 0;
+        }
+
+        if (response_buffer_used == sizeof(response_buffer))
+            return -1;
+        ssize_t count = recv(fd, response_buffer + response_buffer_used,
+                             sizeof(response_buffer) - response_buffer_used, 0);
         if (count < 0 && errno == EINTR)
             continue;
         if (count <= 0)
             return -1;
-        if (byte == '\n') {
-            output[used] = '\0';
-            return 0;
-        }
-        output[used++] = byte;
+        response_buffer_used += (size_t)count;
     }
-    return -1;
 }
 
 static const char *skip_space(const char *cursor)

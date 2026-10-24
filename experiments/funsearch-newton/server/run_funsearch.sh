@@ -140,8 +140,7 @@ cleanup_local() {
     fi
     rm -f "$SOCKET_PATH" "$READY_PATH"
     if [[ "$MODE" == run ]]; then
-        if [[ -L "$PENDING_CURVES" ]]; then rm -f "$PENDING_CURVES"; fi
-        if [[ -L "$PENDING_LOG" ]]; then rm -f "$PENDING_LOG"; fi
+        rm -f "$PENDING_CURVES"
     fi
     rm -f "$SERVER_LOG"
     rmdir "$RUNTIME_DIR" 2>/dev/null || true
@@ -185,6 +184,8 @@ fi
 printf -v START_HOOK '%q ' "$SCRIPT_DIR/attach_run_artifacts.sh" \
     "$PENDING_CURVES" "$PENDING_LOG" "$READY_PATH"
 START_HOOK=${START_HOOK% }
+# FunSearch appends FS_RUN_DIR as the final positional argument when it runs
+# each hook; both helpers use that argument to locate the completed run.
 printf -v FINISH_HOOK '%q ' "$SCRIPT_DIR/stop_score_server.sh" \
     "$SERVER_PID" "$RUNTIME_DIR" "$SOCKET_PATH" "$PENDING_CURVES" "$PENDING_LOG"
 FINISH_HOOK=${FINISH_HOOK% }
@@ -192,6 +193,6 @@ FINISH_HOOK=${FINISH_HOOK% }
 RUN_OUTPUT=$(run_funsearch run start "$PROBLEM_DIR" \
     --instance "$INSTANCE" --run-id "$RUN_ID" \
     --on-start "$START_HOOK" --on-finish "$FINISH_HOOK" \
-    "${RUN_OPTIONS[@]}")
+    "${RUN_OPTIONS[@]+"${RUN_OPTIONS[@]}"}")
 printf '%s\n' "$RUN_OUTPUT"
 KEEP_SERVER=1

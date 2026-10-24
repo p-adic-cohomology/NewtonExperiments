@@ -26,6 +26,7 @@ init_probe: init_probe.c evaluator.c ../candidate.h | check-pack
 
 test: test_shim
 	./test_shim
+	../server/test_run_funsearch.sh
 
 clean:
 	rm -f libevaluator.so test_shim init_probe

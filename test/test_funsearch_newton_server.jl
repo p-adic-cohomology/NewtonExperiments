@@ -39,6 +39,24 @@ using Sockets
         out_of_range[1] = 7
         @test score_instance(instance(7), out_of_range)["status"] == "INVALID"
         @test score_instance("family=plane,d=5,p=4", fermat)["status"] == "INVALID"
+
+        invalid_instances = [
+            ("family=plane,d=5,p=7,broken", "invalid instance field"),
+            ("family=plane,d=5,p=7,p=11", "duplicate instance field"),
+            ("family=affine,d=5,p=7", "only family=plane is supported"),
+            ("family=plane,d=4,p=7", "only degree d=5 is supported"),
+            ("family=plane,d=5,p=7,reward=unknown", "unknown reward mode"),
+            ("family=plane,d=5,p=7,beta=not-a-number", "beta must be"),
+            ("family=plane,d=5,p=7,beta=-1", "beta must be"),
+            ("family=plane,d=5,p=7,eps=NaN", "eps must be"),
+            ("family=plane,d=5,p=7,eps=-1", "eps must be"),
+            ("family=plane,d=5,p=7,exclude_ss=maybe", "exclude_ss must be"),
+        ]
+        for (invalid_instance, expected_message) in invalid_instances
+            response = score_instance(invalid_instance, fermat)
+            @test response["status"] == "INVALID"
+            @test occursin(expected_message, response["msg"])
+        end
     end
 
     @testset "Unexpected curve-construction failures" begin

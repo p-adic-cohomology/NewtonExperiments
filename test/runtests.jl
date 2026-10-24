@@ -4,6 +4,8 @@ using DeRham
 using NewtonExperiments
 using Random
 
+include("setup_deps_paths.jl")
+
 struct FakeNewtonPolygon
     slopes
     slopelengths

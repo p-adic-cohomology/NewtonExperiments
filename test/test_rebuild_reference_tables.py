@@ -87,6 +87,38 @@ class ReferenceTableTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "checksum mismatch"):
                 rebuild.verified_source_file(Path(directory), source.name, "0" * 32)
 
+    def test_write_table_sorts_primes_and_preserves_exact_rational_format(self) -> None:
+        polygons = {
+            13: [
+                (
+                    (Fraction(1, 2), Fraction(2)),
+                    (2, 1),
+                    (Fraction(0), Fraction(1, 2), Fraction(1), Fraction(3)),
+                )
+            ],
+            7: [
+                (
+                    (Fraction(-1, 3),),
+                    (1,),
+                    (Fraction(0), Fraction(-1, 3)),
+                )
+            ],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "nested" / "references.tsv"
+            rebuild.write_table(output, polygons)
+            with output.open(newline="", encoding="utf-8") as source:
+                rows = list(csv.reader(source, delimiter="\t"))
+
+        self.assertEqual(
+            rows,
+            [
+                ["p", "slopes", "lengths", "polygon_values"],
+                ["7", "-1/3", "1", "0;-1/3"],
+                ["13", "1/2;2", "2;1", "0;1/2;1;3"],
+            ],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

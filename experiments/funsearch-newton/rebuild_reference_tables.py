@@ -242,7 +242,11 @@ def main() -> None:
 
             backups: dict[Path, Path | None] = {}
             for _, output in staged_outputs:
-                if output.exists():
+                if output.is_symlink():
+                    backup = staging_dir / f"{output.name}.backup"
+                    backup.symlink_to(os.readlink(output))
+                    backups[output] = backup
+                elif output.exists():
                     backup = staging_dir / f"{output.name}.backup"
                     shutil.copy2(output, backup)
                     backups[output] = backup

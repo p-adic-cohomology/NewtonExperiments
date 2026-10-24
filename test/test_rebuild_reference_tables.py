@@ -228,6 +228,42 @@ class ReferenceTableTests(unittest.TestCase):
             self.assertEqual(quintic.read_bytes(), b"old quintic table")
             self.assertEqual(sextic.read_bytes(), b"old sextic table")
 
+    def test_main_preserves_existing_outputs_if_second_source_download_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            data_dir = root / "cache"
+            output_dir = root / "reference"
+            output_dir.mkdir()
+            quintic = output_dir / rebuild.OUTPUT_NAMES[5]
+            sextic = output_dir / rebuild.OUTPUT_NAMES[6]
+            quintic.write_bytes(b"old quintic table")
+            sextic.write_bytes(b"old sextic table")
+
+            argv = [
+                "rebuild_reference_tables.py",
+                "--data-dir",
+                str(data_dir),
+                "--output-dir",
+                str(output_dir),
+            ]
+
+            def fail_sextic_download(
+                directory: Path, filename: str, _checksum: str
+            ) -> Path:
+                if filename == rebuild.INPUTS[6][0]:
+                    raise OSError("sextic download failed")
+                return directory / filename
+
+            with (
+                patch("sys.argv", argv),
+                patch.object(rebuild, "verified_source_file", side_effect=fail_sextic_download),
+            ):
+                with self.assertRaisesRegex(OSError, "sextic download failed"):
+                    rebuild.main()
+
+            self.assertEqual(quintic.read_bytes(), b"old quintic table")
+            self.assertEqual(sextic.read_bytes(), b"old sextic table")
+
     def test_main_rolls_back_pair_if_second_output_replace_fails(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -307,6 +343,62 @@ class ReferenceTableTests(unittest.TestCase):
 
             self.assertFalse(quintic.exists())
             self.assertFalse(sextic.exists())
+
+    def test_main_preserves_symlinked_output_if_second_output_replace_fails(self) -> None:
+        for target_exists in (True, False):
+            with (
+                self.subTest(target_exists=target_exists),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                root = Path(directory)
+                data_dir = root / "cache"
+                output_dir = root / "reference"
+                shared_dir = root / "shared"
+                output_dir.mkdir()
+                shared_dir.mkdir()
+                quintic = output_dir / rebuild.OUTPUT_NAMES[5]
+                sextic = output_dir / rebuild.OUTPUT_NAMES[6]
+                target = shared_dir / ("existing.tsv" if target_exists else "missing.tsv")
+                if target_exists:
+                    target.write_bytes(b"symlink target contents")
+                relative_target = Path("../shared") / target.name
+                quintic.symlink_to(relative_target)
+                sextic.write_bytes(b"old sextic table")
+
+                argv = [
+                    "rebuild_reference_tables.py",
+                    "--data-dir",
+                    str(data_dir),
+                    "--output-dir",
+                    str(output_dir),
+                ]
+                original_replace = Path.replace
+
+                def fail_sextic_replace(source: Path, destination: str | Path) -> Path:
+                    if Path(destination) == sextic:
+                        raise OSError("sextic publication failed")
+                    return original_replace(source, destination)
+
+                with (
+                    patch("sys.argv", argv),
+                    patch.object(
+                        rebuild,
+                        "verified_source_file",
+                        side_effect=lambda directory, filename, _checksum: directory / filename,
+                    ),
+                    patch.object(rebuild, "read_distinct_polygons", return_value={7: []}),
+                    patch.object(Path, "replace", fail_sextic_replace),
+                ):
+                    with self.assertRaisesRegex(OSError, "sextic publication failed"):
+                        rebuild.main()
+
+                self.assertTrue(quintic.is_symlink())
+                self.assertEqual(quintic.readlink(), relative_target)
+                if target_exists:
+                    self.assertEqual(target.read_bytes(), b"symlink target contents")
+                else:
+                    self.assertFalse(quintic.exists())
+                self.assertEqual(sextic.read_bytes(), b"old sextic table")
 
     def test_committed_reference_tables_match_pinned_content(self) -> None:
         expected_hashes = {

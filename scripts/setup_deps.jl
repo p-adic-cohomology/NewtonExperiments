@@ -10,17 +10,17 @@ repos = [
 
 include(joinpath(@__DIR__, "setup_deps_paths.jl"))
 
+revision_pins = Dict(
+    revision_env => normalize_revision_pin(get(ENV, revision_env, ""), revision_env)
+    for (_, _, _, _, revision_env) in repos
+)
 repo_directories = first.(repos)
 siblings_root = shared_checkout_root(project_root, repo_directories)
 mkpath(siblings_root)
 
 for (directory, package, uuid, url, revision_env) in repos
     sibling = joinpath(siblings_root, directory)
-    expected_revision = lowercase(strip(get(ENV, revision_env, "")))
-    if !isempty(expected_revision)
-        occursin(r"^[0-9a-f]{40}$", expected_revision) ||
-            error("$revision_env must be a full 40-character commit SHA, got: $expected_revision")
-    end
+    expected_revision = revision_pins[revision_env]
 
     if !isdir(sibling)
         if isempty(expected_revision)

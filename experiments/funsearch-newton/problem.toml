@@ -1,0 +1,34 @@
+[problem]
+name = "Newton polygons of plane quintics"
+instance = "family=plane,d=5,p=7,reward=mixed,beta=0.5,eps=0.01,exclude_ss=true"
+
+[candidate]
+language = "c"
+compile = "cc -O2 -shared -fPIC -o {out} {src}"
+compile_try = "cc -O1 -g -fsanitize=address,undefined -shared -fPIC -o {out} {src}"
+exports = ["curve"]
+
+[evaluator]
+build = 'make -C evaluator FS_PACK="${FUNSEARCH_PACK:-/Users/Shared/Developer/ai/city/math-city/packs/funsearch}"'
+library = "evaluator/libevaluator.so"
+# Initial per-candidate limits; the run-readiness work finalizes them from measurements.
+timeout_s = 30
+memory_mb = 512
+env = ["FUNSEARCH_NEWTON_SOCKET"]
+
+[search]
+islands = 4
+mutators = 3
+tasks_per_session = 5
+trial_budget = 3
+parents_per_task = 2
+workers = 2
+reset_period_s = 1800
+
+[stop]
+duration_s = 3600
+max_children = 100
+plateau_children = 0
+
+[mutator]
+model = "claude-haiku-4-5-20251001"

@@ -52,6 +52,23 @@ using Sockets
         @test occursin("injected curve-construction failure", details.response["msg"])
     end
 
+    @testset "DeRham failures are classified by curve smoothness" begin
+        failing_polygon = (curve; kwargs...) -> throw(UndefVarError(:verbose))
+        smooth_failure = server_module._score_details(
+            instance(7), fermat; polygon_builder=failing_polygon,
+        )
+        @test smooth_failure.response["status"] == "ERROR"
+        @test occursin("DeRham evaluation failed", smooth_failure.response["msg"])
+
+        singular_coefficients = zeros(Int, 21)
+        singular_coefficients[21] = 1
+        singular_failure = server_module._score_details(
+            instance(7), singular_coefficients; polygon_builder=failing_polygon,
+        )
+        @test singular_failure.response["status"] == "INVALID"
+        @test singular_failure.response["msg"] == "curve is singular"
+    end
+
     @testset "Known smooth and singular curves" begin
         supersingular = score_instance(instance(7), fermat)
         @test supersingular["status"] == "OK"
@@ -294,6 +311,55 @@ using Sockets
                 foreach(close, connections)
                 excess !== nothing && close(excess)
                 server_module.stop_server(server)
+            end
+        end
+    end
+
+    @testset "Stopping the server releases an idle client" begin
+        mktempdir() do directory
+            socket_path = joinpath(directory, "score.sock")
+            ready_path = joinpath(directory, "ready.json")
+            curves_path = joinpath(directory, "curves.jsonl")
+            server = server_module.start_server(socket_path, ready_path, curves_path)
+            connection = nothing
+            reader = nothing
+            stop_task = nothing
+            try
+                connection = Sockets.connect(socket_path)
+                deadline = time() + 5
+                while true
+                    active_clients = lock(server.clients_lock) do
+                        length(server.client_connections)
+                    end
+                    active_clients == 1 && break
+                    time() < deadline || error("server did not accept the idle client")
+                    yield()
+                end
+
+                reader = @async try
+                    read(connection, UInt8)
+                catch error
+                    error
+                end
+                stop_task = @async server_module.stop_server(server)
+                stop_status = timedwait(() -> istaskdone(stop_task), 5; pollint=0.01)
+                @test stop_status == :ok
+                if stop_status == :ok
+                    fetch(stop_task)
+                end
+
+                reader_status = timedwait(() -> istaskdone(reader), 5; pollint=0.01)
+                @test reader_status == :ok
+                if reader_status == :ok
+                    @test fetch(reader) isa EOFError
+                end
+                @test !ispath(socket_path)
+                @test !ispath(ready_path)
+            finally
+                connection !== nothing && close(connection)
+                if stop_task === nothing
+                    server_module.stop_server(server)
+                end
             end
         end
     end

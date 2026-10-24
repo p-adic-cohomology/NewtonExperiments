@@ -21,7 +21,7 @@ Every parsed JSON object request, including invalid inputs and singular curves, 
 
 The Unix socket is created with mode `0600` so access does not depend on the process umask. The ready file is written only after warm-up and precision capture; if startup fails after binding the socket, the listener, worker tasks, socket path, and ready file are cleaned up.
 
-DeRham 59b331b's non-smooth basis path contains an undefined `verbose` reference where it intends to return `false`. The server maps that specific `UndefVarError` to `INVALID`, matching DeRham's documented non-smooth result; other evaluation exceptions remain `ERROR`.
+If DeRham throws while evaluating a curve, the server independently checks projective smoothness with Oscar. Singular curves return `INVALID`; failures on smooth curves remain `ERROR`.
 
 Run `measure_server.jl` with an optional sample count (minimum 20) to record cold module load, Fermat warm-up latency, median scoring time over random smooth quintics at p=7, peak RSS, and DeRham precision provenance. The script skips singular random samples and does not write to a run's curve log.
 

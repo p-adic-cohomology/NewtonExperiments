@@ -152,7 +152,25 @@ function _build_curve(p::Int, coefficients::Vector{Int})
     Oscar.finish(context)
 end
 
-function _score_details(instance, coefficients; curve_builder=_build_curve)
+function _is_singular_plane_quintic(p::Int, coefficients::Vector{Int})
+    field = Oscar.GF(p)
+    ambient = Oscar.projective_space(field, [:x, :y, :z])
+    ring = Oscar.homogeneous_coordinate_ring(ambient)
+    variables = Oscar.gens(ring)
+    polynomial = zero(ring)
+    for (coefficient, exponents) in zip(coefficients, MONOMIAL_EXPONENTS)
+        iszero(coefficient) && continue
+        term = field(coefficient)
+        for (variable, exponent) in zip(variables, exponents)
+            term *= variable^exponent
+        end
+        polynomial += term
+    end
+    curve = Oscar.subscheme(ambient, polynomial)
+    !Oscar.is_smooth(curve; algorithm=:affine_cone)
+end
+
+function _score_details(instance, coefficients; curve_builder=_build_curve, polygon_builder=DeRham.newton_polygon)
     raw_coefficients = coefficients isa AbstractVector ? coefficients : nothing
     config = try
         _parse_instance(instance)
@@ -181,7 +199,7 @@ function _score_details(instance, coefficients; curve_builder=_build_curve)
         return _error_details("could not construct curve: $(sprint(showerror, error))"; p=config.p, coefficients=parsed_coefficients)
     end
     derham_polygon = try
-        DeRham.newton_polygon(
+        polygon_builder(
             curve;
             S=[0, 1, 2],
             fastevaluation=true,
@@ -189,9 +207,17 @@ function _score_details(instance, coefficients; curve_builder=_build_curve)
             use_gpu=false,
         )
     catch error
-        if error isa UndefVarError && error.var === :verbose
-            return _invalid_details("curve is singular"; p=config.p, coefficients=parsed_coefficients)
+        singular = try
+            _is_singular_plane_quintic(config.p, parsed_coefficients)
+        catch singularity_error
+            return _error_details(
+                "DeRham evaluation failed: $(sprint(showerror, error)); " *
+                "independent singularity check failed: $(sprint(showerror, singularity_error))";
+                p=config.p,
+                coefficients=parsed_coefficients,
+            )
         end
+        singular && return _invalid_details("curve is singular"; p=config.p, coefficients=parsed_coefficients)
         return _error_details("DeRham evaluation failed: $(sprint(showerror, error))"; p=config.p, coefficients=parsed_coefficients)
     end
     derham_polygon === false &&

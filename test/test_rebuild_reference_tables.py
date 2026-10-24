@@ -275,6 +275,69 @@ class ReferenceTableTests(unittest.TestCase):
             self.assertEqual(quintic.read_bytes(), b"old quintic table")
             self.assertEqual(sextic.read_bytes(), b"old sextic table")
 
+    def test_main_publishes_both_tables_after_successful_validation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            data_dir = root / "cache"
+            output_dir = root / "reference"
+            output_dir.mkdir()
+            quintic = output_dir / rebuild.OUTPUT_NAMES[5]
+            sextic = output_dir / rebuild.OUTPUT_NAMES[6]
+            quintic.write_bytes(b"old quintic table")
+            sextic.write_bytes(b"old sextic table")
+
+            argv = [
+                "rebuild_reference_tables.py",
+                "--data-dir",
+                str(data_dir),
+                "--output-dir",
+                str(output_dir),
+            ]
+            tables = {
+                5: {7: [((Fraction(1),), (1,), (Fraction(0), Fraction(1)))]},
+                6: {11: [((Fraction(2),), (1,), (Fraction(0), Fraction(2)))]},
+            }
+            with (
+                patch("sys.argv", argv),
+                patch.object(
+                    rebuild,
+                    "verified_source_file",
+                    side_effect=lambda directory, filename, _checksum: directory / filename,
+                ) as verify_source,
+                patch.object(
+                    rebuild,
+                    "read_distinct_polygons",
+                    side_effect=lambda _source, degree: tables[degree],
+                ) as read_polygons,
+                patch("sys.stdout", new_callable=io.StringIO) as stdout,
+            ):
+                rebuild.main()
+
+            self.assertEqual(
+                [call.args for call in verify_source.call_args_list],
+                [
+                    (data_dir.resolve(), filename, checksum)
+                    for filename, checksum in rebuild.INPUTS.values()
+                ],
+            )
+            self.assertEqual(
+                [call.args for call in read_polygons.call_args_list],
+                [
+                    (data_dir.resolve() / filename, degree)
+                    for degree, (filename, _checksum) in rebuild.INPUTS.items()
+                ],
+            )
+            self.assertEqual(
+                quintic.read_text(encoding="utf-8"),
+                "p\tslopes\tlengths\tpolygon_values\n7\t1\t1\t0;1\n",
+            )
+            self.assertEqual(
+                sextic.read_text(encoding="utf-8"),
+                "p\tslopes\tlengths\tpolygon_values\n11\t2\t1\t0;2\n",
+            )
+            self.assertIn(f"wrote {quintic} (p=7: 1)", stdout.getvalue())
+            self.assertIn(f"wrote {sextic} (p=11: 1)", stdout.getvalue())
+
     def test_main_rolls_back_pair_if_second_output_replace_fails(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

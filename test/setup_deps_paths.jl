@@ -18,6 +18,7 @@ end
 
 @testset "Dependency setup paths" begin
     mktempdir() do temporary_root
+        temporary_root = realpath(temporary_root)
         siblings_root = joinpath(temporary_root, "repositories")
         project_root = joinpath(siblings_root, "NewtonExperiments")
         mkpath(project_root)

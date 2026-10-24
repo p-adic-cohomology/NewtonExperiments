@@ -29,6 +29,18 @@ using Sockets
         "curves" => "curves.jsonl",
     )
 
+    @testset "Invalid startup arguments" begin
+        @test_throws ArgumentError server_module._server_arguments(["--unknown", "value"])
+        @test_throws ArgumentError server_module._server_arguments(["--socket"])
+        withenv(
+            "FUNSEARCH_NEWTON_SOCKET" => nothing,
+            "FUNSEARCH_NEWTON_READY" => nothing,
+            "FUNSEARCH_NEWTON_CURVES" => nothing,
+        ) do
+            @test_throws ArgumentError server_module._server_arguments(String[])
+        end
+    end
+
     @testset "Invalid inputs" begin
         response = score_instance(instance(7), zeros(Int, 21))
         @test response["status"] == "INVALID"

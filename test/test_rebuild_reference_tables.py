@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import io
 import importlib.util
 import tempfile
 import unittest
@@ -57,6 +58,29 @@ class ReferenceTableTests(unittest.TestCase):
                 2,
             )
 
+    def test_validate_polygon_rejects_malformed_vectors(self) -> None:
+        cases = (
+            ((), (), (Fraction(0),), "non-empty parallel vectors"),
+            ((Fraction(0),), (), (Fraction(0),), "non-empty parallel vectors"),
+            ((Fraction(0),), (0,), (Fraction(0),), "must be positive"),
+            ((Fraction(0),), (1,), (Fraction(1), Fraction(1)), "initial polygon ordinate"),
+        )
+        for slopes, lengths, values, message in cases:
+            with self.subTest(message=message):
+                with self.assertRaisesRegex(ValueError, message):
+                    rebuild.validate_polygon(slopes, lengths, values, "fixture.csv", 2)
+
+    def test_read_distinct_polygons_rejects_non_integral_slope_lengths(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "fixture.csv"
+            with source.open("w", newline="", encoding="utf-8") as output:
+                writer = csv.writer(output)
+                writer.writerow(("n", "d", "p", "slopes", "slopelengths", "values"))
+                writer.writerow((3, 5, 7, "[1/2]", "[1/2]", "[0,1/2]"))
+
+            with self.assertRaisesRegex(ValueError, "non-integral slope length"):
+                rebuild.read_distinct_polygons(source, 5)
+
     def test_read_distinct_polygons_deduplicates_and_checks_pinned_counts(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "fixture.csv"
@@ -86,6 +110,89 @@ class ReferenceTableTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(ValueError, "checksum mismatch"):
                 rebuild.verified_source_file(Path(directory), source.name, "0" * 32)
+
+    def test_uncached_source_download_verifies_and_cleans_partial_files(self) -> None:
+        payload = b"downloaded source contents"
+        expected = hashlib.md5(payload).hexdigest()
+        url = (
+            f"https://zenodo.org/api/records/{rebuild.RECORD_ID}/"
+            "files/source.csv/content"
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            data_dir = Path(directory)
+            with patch.object(rebuild, "urlopen", return_value=io.BytesIO(payload)) as open_url:
+                source = rebuild.verified_source_file(data_dir, "source.csv", expected)
+
+            self.assertEqual(source.read_bytes(), payload)
+            self.assertEqual(open_url.call_args.args[0].full_url, url)
+            self.assertFalse((data_dir / "source.csv.part").exists())
+
+        with tempfile.TemporaryDirectory() as directory:
+            data_dir = Path(directory)
+            with patch.object(rebuild, "urlopen", return_value=io.BytesIO(payload)):
+                with self.assertRaisesRegex(ValueError, "checksum mismatch"):
+                    rebuild.verified_source_file(data_dir, "source.csv", "0" * 32)
+
+            self.assertFalse((data_dir / "source.csv").exists())
+            self.assertFalse((data_dir / "source.csv.part").exists())
+
+    def test_main_validates_all_sources_before_replacing_any_output(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            data_dir = root / "cache"
+            output_dir = root / "reference"
+            output_dir.mkdir()
+            quintic = output_dir / rebuild.OUTPUT_NAMES[5]
+            sextic = output_dir / rebuild.OUTPUT_NAMES[6]
+            quintic.write_bytes(b"old quintic table")
+            sextic.write_bytes(b"old sextic table")
+
+            def read_polygons(source: Path, degree: int):
+                if degree == 6:
+                    raise ValueError("sextic validation failed")
+                return {7: []}
+
+            argv = [
+                "rebuild_reference_tables.py",
+                "--data-dir",
+                str(data_dir),
+                "--output-dir",
+                str(output_dir),
+            ]
+            with (
+                patch("sys.argv", argv),
+                patch.object(
+                    rebuild,
+                    "verified_source_file",
+                    side_effect=lambda directory, filename, _checksum: directory / filename,
+                ),
+                patch.object(rebuild, "read_distinct_polygons", side_effect=read_polygons),
+            ):
+                with self.assertRaisesRegex(ValueError, "sextic validation failed"):
+                    rebuild.main()
+
+            self.assertEqual(quintic.read_bytes(), b"old quintic table")
+            self.assertEqual(sextic.read_bytes(), b"old sextic table")
+
+    def test_committed_reference_tables_match_pinned_content(self) -> None:
+        expected_hashes = {
+            5: "b14f1d0fa945454f874dbcb58aa2b2e908af3915c40f0ec31bcc3cd3f62fbce5",
+            6: "98f8821c081e61a8a7e6f063debcedae4dd967eefa0c03908ffbf08f9d48b20c",
+        }
+        for degree, filename in rebuild.OUTPUT_NAMES.items():
+            with self.subTest(degree=degree):
+                path = rebuild.DEFAULT_OUTPUT_DIR / filename
+                digest = hashlib.sha256(path.read_bytes()).hexdigest()
+                self.assertEqual(digest, expected_hashes[degree])
+                with path.open(newline="", encoding="utf-8") as source:
+                    rows = list(csv.reader(source, delimiter="\t"))
+                self.assertEqual(rows[0], ["p", "slopes", "lengths", "polygon_values"])
+                counts: dict[int, int] = {}
+                for row in rows[1:]:
+                    prime = int(row[0])
+                    counts[prime] = counts.get(prime, 0) + 1
+                self.assertEqual(counts, rebuild.EXPECTED_COUNTS[degree])
 
     def test_write_table_sorts_primes_and_preserves_exact_rational_format(self) -> None:
         polygons = {

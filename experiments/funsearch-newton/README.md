@@ -29,8 +29,9 @@ python3 experiments/funsearch-newton/rebuild_reference_tables.py \
   --data-dir /tmp/newton-polygon-source
 ```
 
-The script verifies the source checksums and asserts the pinned distinct-polygon
-counts before writing either table.
+The script verifies both source checksums and pinned distinct-polygon counts, then
+stages both tables before replacing either output. A failed download or
+validation leaves the existing tables unchanged.
 
 Run the offline Python tests from the repository root with:
 

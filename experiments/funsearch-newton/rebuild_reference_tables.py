@@ -207,12 +207,30 @@ def main() -> None:
 
     scratch_dir, temporary = data_directory(args.data_dir)
     try:
+        tables = {}
         for degree, (filename, checksum) in INPUTS.items():
             source = verified_source_file(scratch_dir, filename, checksum)
             print(f"verified {source} (md5:{checksum})")
-            polygons = read_distinct_polygons(source, degree)
+            tables[degree] = read_distinct_polygons(source, degree)
+
+        # Validate and stage every table before replacing either committed output.
+        args.output_dir.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(
+            prefix=".newton-reference-tables-", dir=args.output_dir
+        ) as staging_name:
+            staging_dir = Path(staging_name)
+            staged_outputs: list[tuple[Path, Path]] = []
+            for degree, polygons in tables.items():
+                output = args.output_dir / OUTPUT_NAMES[degree]
+                staged_output = staging_dir / output.name
+                write_table(staged_output, polygons)
+                staged_outputs.append((staged_output, output))
+
+            for staged_output, output in staged_outputs:
+                staged_output.replace(output)
+
+        for degree, polygons in tables.items():
             output = args.output_dir / OUTPUT_NAMES[degree]
-            write_table(output, polygons)
             counts = ", ".join(f"p={prime}: {len(rows)}" for prime, rows in sorted(polygons.items()))
             print(f"wrote {output} ({counts})")
         print(f"source: {RECORD_URL}")

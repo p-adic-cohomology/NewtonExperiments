@@ -2,7 +2,7 @@
 
 julia_version = "1.13.2"
 manifest_format = "2.1"
-project_hash = "026c8b592570660bdfbfb2ab002b77a2a08cd4ae"
+project_hash = "c3552545e56c4f5a36361b8e3bfa7b2c87feb869"
 
 [[deps.ASL_jll]]
 deps = ["Artifacts", "JLLWrappers", "Libdl"]
@@ -1123,7 +1123,7 @@ uuid = "ca575930-c2e3-43a9-ace4-1e988b2c1908"
 version = "1.3.0"
 
 [[deps.NewtonExperiments]]
-deps = ["CSV", "Combinatorics", "DataFrames", "DeRham", "Distributed", "GPUFiniteFieldMatrices", "HTTP", "JSON", "Oscar", "Random"]
+deps = ["CSV", "Combinatorics", "DataFrames", "Dates", "DeRham", "Distributed", "GPUFiniteFieldMatrices", "HTTP", "JSON", "Oscar", "Random", "Sockets"]
 path = "."
 uuid = "58bbd6f2-1fb0-4a42-a45b-e18fef6f7f1c"
 version = "0.1.0"

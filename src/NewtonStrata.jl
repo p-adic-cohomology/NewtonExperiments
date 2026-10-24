@@ -46,7 +46,12 @@ struct SlopeMultiplicityPolygon
             len isa Integer && !(len isa Bool) ||
                 throw(ArgumentError("slopelengths must be positive integers"))
             len > 0 || throw(ArgumentError("slopelengths must be positive integers"))
-            exact_length = Int(len)
+            exact_length = try
+                Int(len)
+            catch err
+                err isa InexactError || rethrow()
+                throw(ArgumentError("total polygon height must fit in Int"))
+            end
             total_length = _checked_add_length(total_length, exact_length)
             push!(lengths, exact_length)
         end

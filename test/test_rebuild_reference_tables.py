@@ -269,6 +269,45 @@ class ReferenceTableTests(unittest.TestCase):
             self.assertEqual(quintic.read_bytes(), b"old quintic table")
             self.assertEqual(sextic.read_bytes(), b"old sextic table")
 
+    def test_main_removes_new_output_if_second_output_replace_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            data_dir = root / "cache"
+            output_dir = root / "reference"
+            output_dir.mkdir()
+            quintic = output_dir / rebuild.OUTPUT_NAMES[5]
+            sextic = output_dir / rebuild.OUTPUT_NAMES[6]
+
+            argv = [
+                "rebuild_reference_tables.py",
+                "--data-dir",
+                str(data_dir),
+                "--output-dir",
+                str(output_dir),
+            ]
+            original_replace = Path.replace
+
+            def fail_sextic_replace(source: Path, target: str | Path) -> Path:
+                if Path(target) == sextic:
+                    raise OSError("sextic publication failed")
+                return original_replace(source, target)
+
+            with (
+                patch("sys.argv", argv),
+                patch.object(
+                    rebuild,
+                    "verified_source_file",
+                    side_effect=lambda directory, filename, _checksum: directory / filename,
+                ),
+                patch.object(rebuild, "read_distinct_polygons", return_value={7: []}),
+                patch.object(Path, "replace", fail_sextic_replace),
+            ):
+                with self.assertRaisesRegex(OSError, "sextic publication failed"):
+                    rebuild.main()
+
+            self.assertFalse(quintic.exists())
+            self.assertFalse(sextic.exists())
+
     def test_committed_reference_tables_match_pinned_content(self) -> None:
         expected_hashes = {
             5: "b14f1d0fa945454f874dbcb58aa2b2e908af3915c40f0ec31bcc3cd3f62fbce5",

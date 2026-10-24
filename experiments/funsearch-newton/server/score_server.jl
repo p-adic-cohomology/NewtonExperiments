@@ -152,7 +152,7 @@ function _build_curve(p::Int, coefficients::Vector{Int})
     Oscar.finish(context)
 end
 
-function _score_details(instance, coefficients)
+function _score_details(instance, coefficients; curve_builder=_build_curve)
     raw_coefficients = coefficients isa AbstractVector ? coefficients : nothing
     config = try
         _parse_instance(instance)
@@ -176,9 +176,9 @@ function _score_details(instance, coefficients)
         return _invalid_details("the zero polynomial is invalid"; p=config.p, coefficients=parsed_coefficients)
 
     curve = try
-        _build_curve(config.p, parsed_coefficients)
+        curve_builder(config.p, parsed_coefficients)
     catch error
-        return _invalid_details("could not construct curve: $(sprint(showerror, error))"; p=config.p, coefficients=parsed_coefficients)
+        return _error_details("could not construct curve: $(sprint(showerror, error))"; p=config.p, coefficients=parsed_coefficients)
     end
     derham_polygon = try
         DeRham.newton_polygon(

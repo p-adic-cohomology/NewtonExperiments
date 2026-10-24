@@ -41,6 +41,17 @@ using Sockets
         @test score_instance("family=plane,d=5,p=4", fermat)["status"] == "INVALID"
     end
 
+    @testset "Unexpected curve-construction failures" begin
+        details = server_module._score_details(
+            instance(7),
+            fermat;
+            curve_builder=(p, coefficients) -> error("injected curve-construction failure"),
+        )
+        @test details.response["status"] == "ERROR"
+        @test occursin("could not construct curve", details.response["msg"])
+        @test occursin("injected curve-construction failure", details.response["msg"])
+    end
+
     @testset "Known smooth and singular curves" begin
         supersingular = score_instance(instance(7), fermat)
         @test supersingular["status"] == "OK"
@@ -176,6 +187,23 @@ using Sockets
         end
     end
 
+    @testset "Retention failures are returned to the client" begin
+        mktempdir() do directory
+            parent_file = joinpath(directory, "not-a-directory")
+            write(parent_file, "occupied")
+            curves_path = joinpath(parent_file, "curves.jsonl")
+            request = Dict(
+                "instance" => instance(7),
+                "coeffs" => zeros(Int, 21),
+            )
+
+            response = server_module._request_response(request, curves_path)
+
+            @test response["status"] == "ERROR"
+            @test occursin("curve retention failed", response["msg"])
+        end
+    end
+
     @testset "Socket protocol errors are not retained" begin
         mktempdir() do directory
             socket_path = joinpath(directory, "score.sock")
@@ -231,6 +259,42 @@ using Sockets
             @test length(rows) == length(requests)
             retained = Dict(row["program_id"] => row["status"] for row in rows)
             @test retained == Dict(request["program_id"] => expected[i] for (i, request) in enumerate(requests))
+        end
+    end
+
+    @testset "Excess client connections are closed" begin
+        mktempdir() do directory
+            socket_path = joinpath(directory, "score.sock")
+            ready_path = joinpath(directory, "ready.json")
+            curves_path = joinpath(directory, "curves.jsonl")
+            server = server_module.start_server(socket_path, ready_path, curves_path)
+            connections = Sockets.connect.(fill(socket_path, server_module.MAX_ACTIVE_CLIENTS))
+            excess = nothing
+            excess_read = nothing
+            try
+                deadline = time() + 5
+                while true
+                    active_clients = lock(server.clients_lock) do
+                        length(server.client_connections)
+                    end
+                    active_clients == server_module.MAX_ACTIVE_CLIENTS && break
+                    time() < deadline || error("server did not accept the configured client limit")
+                    yield()
+                end
+
+                excess = Sockets.connect(socket_path)
+                excess_read = @async try
+                    read(excess, UInt8)
+                catch error
+                    error
+                end
+                @test timedwait(() -> istaskdone(excess_read), 5; pollint=0.01) == :ok
+                @test fetch(excess_read) isa EOFError
+            finally
+                foreach(close, connections)
+                excess !== nothing && close(excess)
+                server_module.stop_server(server)
+            end
         end
     end
 

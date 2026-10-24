@@ -91,6 +91,22 @@ using Sockets
         end
     end
 
+    @testset "Socket is private at bind time" begin
+        mktempdir() do directory
+            socket_path = joinpath(directory, "score.sock")
+            original_umask = ccall(:umask, Cint, (Cint,), Cint(0o022))
+            listener = nothing
+            try
+                listener = server_module._listen_private_socket(socket_path)
+                @test (stat(socket_path).mode & 0o777) == 0o600
+            finally
+                ccall(:umask, Cint, (Cint,), original_umask)
+                listener !== nothing && close(listener)
+                rm(socket_path; force=true)
+            end
+        end
+    end
+
     @testset "Unix socket round trip and append-only retention" begin
         mktempdir() do directory
             socket_path = joinpath(directory, "score.sock")

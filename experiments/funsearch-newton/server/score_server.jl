@@ -3,6 +3,7 @@ module FunSearchNewtonServer
 const LOAD_STARTED_NS = time_ns()
 const MAX_REQUEST_BYTES = 64 * 1024
 const MAX_ACTIVE_CLIENTS = 64
+const SOCKET_UMASK_LOCK = ReentrantLock()
 
 using Dates
 using DeRham
@@ -475,6 +476,17 @@ function _write_ready_file(path::AbstractString, record)
     nothing
 end
 
+function _listen_private_socket(socket_path::AbstractString)
+    lock(SOCKET_UMASK_LOCK) do
+        previous_umask = ccall(:umask, Cint, (Cint,), Cint(0o177))
+        try
+            Sockets.listen(socket_path)
+        finally
+            ccall(:umask, Cint, (Cint,), previous_umask)
+        end
+    end
+end
+
 function _start_server(
     socket_path::AbstractString,
     ready_path::AbstractString,
@@ -494,7 +506,7 @@ function _start_server(
     ready_record = _ready_record(warmup_seconds, warmup_response, precision)
     mkpath(dirname(abspath(socket_path)))
     mkpath(dirname(abspath(ready_path)))
-    listener = Sockets.listen(socket_path)
+    listener = _listen_private_socket(socket_path)
     request_queue = Channel{PendingRequest}(32)
     client_slots = Channel{Nothing}(MAX_ACTIVE_CLIENTS)
     for _ in 1:MAX_ACTIVE_CLIENTS

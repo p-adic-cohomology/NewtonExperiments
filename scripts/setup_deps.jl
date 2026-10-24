@@ -9,27 +9,10 @@ repos = [
     ("DeRham.jl", "DeRham", "0ea6bb9e-09b2-4dc0-b975-f97753fde228", "https://github.com/UCSD-computational-number-theory/DeRham.jl.git"),
 ]
 
-function shared_checkout_root(project_root)
-    configured = get(ENV, "NEWTON_SIBLING_ROOT", "")
-    !isempty(configured) && return abspath(configured)
+include(joinpath(@__DIR__, "setup_deps_paths.jl"))
 
-    common_git_dir = try
-        strip(read(`git -C $project_root rev-parse --git-common-dir`, String))
-    catch
-        ""
-    end
-    if !isempty(common_git_dir)
-        common_git_dir = isabspath(common_git_dir) ? common_git_dir : joinpath(project_root, common_git_dir)
-        common_repo_root = dirname(realpath(common_git_dir))
-        return dirname(common_repo_root)
-    end
-
-    fallback = dirname(project_root)
-    all(isdir(joinpath(fallback, repo[1])) for repo in repos) && return fallback
-    error("Cannot locate sibling checkouts; set NEWTON_SIBLING_ROOT to their containing directory")
-end
-
-siblings_root = shared_checkout_root(project_root)
+repo_directories = first.(repos)
+siblings_root = shared_checkout_root(project_root, repo_directories)
 mkpath(siblings_root)
 
 for (directory, package, uuid, url) in repos
@@ -43,8 +26,8 @@ for (directory, package, uuid, url) in repos
     get(package_project, "uuid", nothing) == uuid || error("Unexpected UUID for $package in $sibling")
 end
 
-Pkg.develop([
-    Pkg.PackageSpec(path=relpath(joinpath(siblings_root, directory), project_root))
-    for (directory, _, _, _) in repos
-])
-Pkg.instantiate()
+relative_paths = relative_dependency_paths(siblings_root, project_root, repo_directories)
+with_project_directory(project_root) do
+    Pkg.develop([Pkg.PackageSpec(path=path) for path in relative_paths])
+    Pkg.instantiate()
+end

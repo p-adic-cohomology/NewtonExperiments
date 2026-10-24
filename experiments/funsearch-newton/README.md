@@ -31,3 +31,9 @@ python3 experiments/funsearch-newton/rebuild_reference_tables.py \
 
 The script verifies the source checksums and asserts the pinned distinct-polygon
 counts before writing either table.
+
+Run the offline Python tests from the repository root with:
+
+```sh
+python3 -m unittest discover -s test -p 'test_*.py'
+```

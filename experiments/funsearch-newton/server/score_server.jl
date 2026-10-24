@@ -457,7 +457,30 @@ function _ready_record(warmup_seconds::Float64, warmup_response, precision)
     )
 end
 
-function start_server(socket_path::AbstractString, ready_path::AbstractString, curves_path::AbstractString)
+function _write_ready_file(path::AbstractString, record)
+    destination = abspath(path)
+    temporary_path, output = mktemp(dirname(destination))
+    try
+        write(output, JSON.json(record))
+        write(output, '\n')
+        flush(output)
+        close(output)
+        # A same-directory rename publishes the complete file without following a replaced symlink.
+        mv(temporary_path, destination; force=true)
+    catch
+        isopen(output) && close(output)
+        ispath(temporary_path) && rm(temporary_path; force=true)
+        rethrow()
+    end
+    nothing
+end
+
+function _start_server(
+    socket_path::AbstractString,
+    ready_path::AbstractString,
+    curves_path::AbstractString,
+    ready_writer,
+)
     for path in (socket_path, ready_path)
         isempty(path) && throw(ArgumentError("socket and ready paths must be nonempty"))
     end
@@ -485,11 +508,7 @@ function start_server(socket_path::AbstractString, ready_path::AbstractString, c
         chmod(socket_path, 0o600)
         accept_task = @async _accept_loop(listener, request_queue, client_slots, client_connections, clients_lock)
         process_task = @async _process_loop(request_queue, curves_path)
-        open(ready_path, "w") do output
-            write(output, JSON.json(ready_record))
-            write(output, '\n')
-            flush(output)
-        end
+        ready_writer(ready_path, ready_record)
     catch
         isopen(listener) && close(listener)
         if accept_task !== nothing
@@ -527,6 +546,9 @@ function start_server(socket_path::AbstractString, ready_path::AbstractString, c
         ready_record=ready_record,
     )
 end
+
+start_server(socket_path::AbstractString, ready_path::AbstractString, curves_path::AbstractString) =
+    _start_server(socket_path, ready_path, curves_path, _write_ready_file)
 
 function stop_server(server)
     isopen(server.listener) && close(server.listener)

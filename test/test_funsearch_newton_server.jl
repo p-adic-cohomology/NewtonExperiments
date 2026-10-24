@@ -8,6 +8,17 @@ using Sockets
     server_module = FunSearchNewtonServer
     fermat = server_module.FERMAT_COEFFICIENTS
     instance(p; exclude_ss=true) = "family=plane,d=5,p=$p,reward=mixed,beta=0.5,eps=0.01,exclude_ss=$exclude_ss"
+    function request_line(socket_path, line)
+        connection = Sockets.connect(socket_path)
+        try
+            write(connection, line)
+            write(connection, '\n')
+            flush(connection)
+            JSON.parse(readline(connection))
+        finally
+            close(connection)
+        end
+    end
 
     @test length(server_module.MONOMIAL_EXPONENTS) == 21
     @test [collect(exponent) for exponent in server_module.MONOMIAL_EXPONENTS] == DeRham.gen_exp_vec(3, 5, :lex)
@@ -63,6 +74,21 @@ using Sockets
     @testset "Bounded request lines" begin
         @test server_module._read_request_line(IOBuffer("{}\n")) == "{}"
         @test server_module._read_request_line(IOBuffer("x"^(server_module.MAX_REQUEST_BYTES + 1))) == :too_large
+    end
+
+    @testset "Ready-file publication does not follow symlinks" begin
+        mktempdir() do directory
+            target_path = joinpath(directory, "target.json")
+            ready_path = joinpath(directory, "ready.json")
+            write(target_path, "preserve this target")
+            symlink(target_path, ready_path)
+
+            server_module._write_ready_file(ready_path, Dict("status" => "ready"))
+
+            @test read(target_path, String) == "preserve this target"
+            @test !islink(ready_path)
+            @test JSON.parse(read(ready_path, String))["status"] == "ready"
+        end
     end
 
     @testset "Unix socket round trip and append-only retention" begin
@@ -129,6 +155,94 @@ using Sockets
             finally
                 server_module.stop_server(server)
             end
+            @test !ispath(socket_path)
+            @test !ispath(ready_path)
+        end
+    end
+
+    @testset "Socket protocol errors are not retained" begin
+        mktempdir() do directory
+            socket_path = joinpath(directory, "score.sock")
+            ready_path = joinpath(directory, "ready.json")
+            curves_path = joinpath(directory, "curves.jsonl")
+            server = server_module.start_server(socket_path, ready_path, curves_path)
+            try
+                malformed = request_line(socket_path, "not-json")
+                @test malformed["status"] == "ERROR"
+                @test occursin("malformed JSON", malformed["msg"])
+
+                non_object = request_line(socket_path, "[]")
+                @test non_object["status"] == "ERROR"
+                @test occursin("JSON object", non_object["msg"])
+
+                oversized = request_line(socket_path, "x"^(server_module.MAX_REQUEST_BYTES + 1))
+                @test oversized["status"] == "ERROR"
+                @test occursin("exceeds", oversized["msg"])
+            finally
+                server_module.stop_server(server)
+            end
+            @test !isfile(curves_path)
+        end
+    end
+
+    @testset "Concurrent clients receive and retain their own requests" begin
+        mktempdir() do directory
+            socket_path = joinpath(directory, "score.sock")
+            ready_path = joinpath(directory, "ready.json")
+            curves_path = joinpath(directory, "curves.jsonl")
+            server = server_module.start_server(socket_path, ready_path, curves_path)
+            requests = [
+                Dict("program_id" => "concurrent-$i", "instance" => instance(7; exclude_ss=false),
+                     "coeffs" => isodd(i) ? zeros(Int, 21) : fermat)
+                for i in 1:4
+            ]
+            expected = ["INVALID", "OK", "INVALID", "OK"]
+            connections = [Sockets.connect(socket_path) for _ in requests]
+            try
+                for (connection, request) in zip(connections, requests)
+                    write(connection, JSON.json(request))
+                    write(connection, '\n')
+                    flush(connection)
+                end
+                responses = [JSON.parse(readline(connection)) for connection in connections]
+                @test [response["status"] for response in responses] == expected
+            finally
+                foreach(close, connections)
+                server_module.stop_server(server)
+            end
+
+            rows = JSON.parse.(readlines(curves_path))
+            @test length(rows) == length(requests)
+            retained = Dict(row["program_id"] => row["status"] for row in rows)
+            @test retained == Dict(request["program_id"] => expected[i] for (i, request) in enumerate(requests))
+        end
+    end
+
+    @testset "Startup failure cleans bound resources" begin
+        mktempdir() do directory
+            socket_path = joinpath(directory, "score.sock")
+            ready_path = joinpath(directory, "ready.json")
+            curves_path = joinpath(directory, "curves.jsonl")
+            server = nothing
+            startup_error = nothing
+            try
+                server = server_module._start_server(
+                    socket_path,
+                    ready_path,
+                    curves_path,
+                    (path, record) -> error("injected ready-file failure"),
+                )
+            catch caught
+                startup_error = caught
+            end
+            server !== nothing && server_module.stop_server(server)
+
+            @test startup_error isa ErrorException
+            if startup_error !== nothing
+                @test occursin("injected ready-file failure", sprint(showerror, startup_error))
+            end
+            @test !ispath(socket_path)
+            @test !ispath(ready_path)
         end
     end
 end

@@ -89,9 +89,13 @@ pending_curves.touch()
 if mode == "fail-attach":
     pending_curves.unlink()
 quoted_run_dir = shlex.quote(str(run_dir))
-# The engine appends FS_RUN_DIR as the final argument for both hooks.
-subprocess.run(start_hook + " " + quoted_run_dir, shell=True, check=True)
+# The engine appends FS_RUN_DIR as the final argument for both hooks, and it
+# still runs the finish hook after a failed start hook.
+start_result = subprocess.run(start_hook + " " + quoted_run_dir, shell=True)
 finish_result = subprocess.run(finish_hook + " " + quoted_run_dir, shell=True)
+if start_result.returncode:
+    print(f"mock run start hook failed with {start_result.returncode}", file=sys.stderr)
+    raise SystemExit(start_result.returncode)
 if finish_result.returncode:
     print(f"mock run finish hook failed with {finish_result.returncode}", file=sys.stderr)
     raise SystemExit(finish_result.returncode)
@@ -105,6 +109,10 @@ RUN_DIR=$1
 [[ -f "$RUN_DIR/curves.jsonl" ]]
 [[ -f "$RUN_DIR/server-ready.json" ]]
 printf '%s\n' "$RUN_DIR" >> "$PACK_START_LOG"
+if [[ ${MOCK_PACK_START_FAIL:-0} == 1 ]]; then
+    printf '%s\n' "mock pack on-start failure" >&2
+    exit 18
+fi
 SH
 
 cat > "$MOCK_PACK/scripts/on-finish.sh" <<'SH'
@@ -201,6 +209,23 @@ assert_clean_runtime "$attach_fail_curves" "$attach_fail_log" "$STATE_FILE"
 [[ ! -s "$PACK_START_LOG" ]]
 grep -q "Pending curve log is missing" "$TMP_ROOT/fail-attach.out"
 
+rm -f "$STATE_FILE" "$PACK_START_LOG" "$PACK_FINISH_LOG" "$STOP_PS_LOG"
+start_fail_run_id="$run_id-start-fail"
+if MOCK_JULIA_MODE=ready MOCK_FUNSEARCH_MODE=complete MOCK_PACK_START_FAIL=1 \
+    FUNSEARCH_NEWTON_START_TIMEOUT_S=3 "$LAUNCHER" run "$PROBLEM_DIR" --run-id "$start_fail_run_id" \
+    >"$TMP_ROOT/fail-start.out" 2>&1; then
+    echo "expected the failed pack on-start hook to fail the run" >&2
+    exit 1
+fi
+start_fail_curves="$PROBLEM_DIR/runs/.$start_fail_run_id.curves.jsonl"
+start_fail_log="$PROBLEM_DIR/runs/.$start_fail_run_id.server.log"
+assert_clean_runtime "$start_fail_curves" "$start_fail_log" "$STATE_FILE"
+[[ "$(cat "$PACK_START_LOG")" == "$PROBLEM_DIR/runs/$start_fail_run_id" ]]
+[[ "$(cat "$PACK_FINISH_LOG")" == "$PROBLEM_DIR/runs/$start_fail_run_id" ]]
+[[ -s "$STOP_PS_LOG" ]]
+grep -q "mock pack on-start failure" "$TMP_ROOT/fail-start.out"
+grep -q "mock run start hook failed" "$TMP_ROOT/fail-start.out"
+
 rm -f "$STATE_FILE"
 rm -f "$PACK_START_LOG" "$PACK_FINISH_LOG" "$STOP_PS_LOG"
 output=$(MOCK_JULIA_MODE=ready MOCK_FUNSEARCH_MODE=complete \
@@ -228,4 +253,4 @@ assert_clean_runtime "$finish_pending_curves" "$finish_pending_log" "$STATE_FILE
 grep -q "mock pack on-finish failure" "$TMP_ROOT/fail-finish.out"
 grep -q "mock run finish hook failed" "$TMP_ROOT/fail-finish.out"
 
-echo "launcher lifecycle tests passed: readiness, cleanup, hook chaining, attach failure, finish failure"
+echo "launcher lifecycle tests passed: readiness, cleanup, hook chaining, attach failure, start failure, finish failure"

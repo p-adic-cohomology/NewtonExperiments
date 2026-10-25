@@ -60,3 +60,7 @@ server-ready.json and server.log, and stop the server at completion. The run
 directory is created only by FunSearch; a pending log path under runs/ lets the
 seed preflight be retained without claiming the run id early. The evaluator
 logs its fs_init connection time to worker stderr.
+
+On macOS, pass the evaluator's Julia library directory through
+`FS_DYLD_LIBRARY_PATH`. The bash shebang strips `DYLD_*` variables, so this
+requires a FunSearch pack with the `mx-44ng9` carrier support.

@@ -4,7 +4,9 @@ set -euo pipefail
 usage() {
     printf '%s\n' \
         "Usage: run_funsearch.sh check PROBLEM [--instance STRING]" \
-        "       run_funsearch.sh run PROBLEM [--instance STRING] [--run-id ID] [--set KEY=VALUE]..."
+        "       run_funsearch.sh run PROBLEM [--instance STRING] [--run-id ID] [--set KEY=VALUE]..." \
+        "On macOS, set FS_DYLD_LIBRARY_PATH to the evaluator's Julia lib directory; the bash shebang strips DYLD_* variables." \
+        "This requires a FunSearch pack with mx-44ng9."
 }
 
 if (($# < 2)); then
@@ -181,14 +183,17 @@ if [[ "$MODE" == check ]]; then
     exit $?
 fi
 
-printf -v START_HOOK '%q ' "$SCRIPT_DIR/attach_run_artifacts.sh" \
-    "$PENDING_CURVES" "$PENDING_LOG" "$READY_PATH"
-START_HOOK=${START_HOOK% }
 # FunSearch appends FS_RUN_DIR as the final positional argument when it runs
 # each hook; both helpers use that argument to locate the completed run.
-printf -v FINISH_HOOK '%q ' "$SCRIPT_DIR/stop_score_server.sh" \
+printf -v START_HOOK_BODY '%q %q %q %q "$1" && %q "$1"' \
+    "$SCRIPT_DIR/attach_run_artifacts.sh" "$PENDING_CURVES" "$PENDING_LOG" \
+    "$READY_PATH" "$PACK_DIR/scripts/on-start.sh"
+printf -v START_HOOK 'sh -c %q fs-hook' "$START_HOOK_BODY"
+printf -v FINISH_HOOK_BODY \
+    '%q "$1"; pack_status=$?; %q %q %q %q %q %q "$1"; stop_status=$?; [ "$pack_status" -eq 0 ] && [ "$stop_status" -eq 0 ]' \
+    "$PACK_DIR/scripts/on-finish.sh" "$SCRIPT_DIR/stop_score_server.sh" \
     "$SERVER_PID" "$RUNTIME_DIR" "$SOCKET_PATH" "$PENDING_CURVES" "$PENDING_LOG"
-FINISH_HOOK=${FINISH_HOOK% }
+printf -v FINISH_HOOK 'sh -c %q fs-hook' "$FINISH_HOOK_BODY"
 
 RUN_OUTPUT=$(run_funsearch run start "$PROBLEM_DIR" \
     --instance "$INSTANCE" --run-id "$RUN_ID" \

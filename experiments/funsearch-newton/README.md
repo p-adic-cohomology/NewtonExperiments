@@ -37,6 +37,16 @@ The script verifies both source checksums and pinned distinct-polygon counts, th
 stages both tables before replacing either output. A failed download or
 validation leaves the existing tables unchanged.
 
+## Locally known polygons
+
+`reference/known_plane_quintic_newton_polygons.tsv` lists polygons found outside
+the Zenodo data, such as by FunSearch runs. It has the same first four columns,
+plus `codim`, one `example_coeffs` vector in the candidate coefficient order,
+and a free-text `source`. The rebuild script does not touch it; add a row by
+hand after a find is accepted. The score server treats a polygon as known when
+it appears in either table for the same prime. It reads both at startup, so
+the novelty bonus is fixed for the duration of a run.
+
 Run the offline Python tests from the repository root with:
 
 ```sh
@@ -56,7 +66,7 @@ server without starting a search:
 ~~~sh
 experiments/funsearch-newton/server/run_funsearch.sh check \
   experiments/funsearch-newton \
-  --instance 'family=plane,d=5,p=7,reward=mixed,beta=0.5,eps=0.01,exclude_ss=true'
+  --instance 'family=plane,d=5,p=7,reward=logmixed,beta=0.5,eps=0.01,exclude_ss=true'
 ~~~
 
 The launcher also has a run mode for an explicitly authorized FunSearch run.

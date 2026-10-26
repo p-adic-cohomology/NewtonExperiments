@@ -127,7 +127,8 @@ using Sockets
         @test supersingular["status"] == "OK"
         @test supersingular["score"] == 0.0
         @test supersingular["msg"] == "supersingular (excluded)"
-        @test supersingular["sig"] == [0.5, 1.0, 1.5, 2.0, 2.5, 3.0]
+        @test supersingular["sig"][1:6] == [0.5, 1.0, 1.5, 2.0, 2.5, 3.0]
+        @test supersingular["sig"][7] == server_module._curve_id(server_module._canonical_coefficients(7, fermat))
 
         ordinary = score_instance(instance(11), fermat)
         @test ordinary["status"] == "OK"
@@ -150,6 +151,75 @@ using Sockets
         @test server_module._reward_score(5, true, depth) == 5.0
         @test server_module._reward_score(5, true, novelty) == 1.05
         @test server_module._reward_score(12, true, mixed; supersingular_excluded=true) == 0.0
+
+        logmixed = server_module._parse_instance("family=plane,d=5,p=7")
+        @test logmixed.reward == "logmixed"
+        @test server_module._reward_score(0, false, logmixed) == 0.0
+        @test server_module._reward_score(3, false, logmixed) == 2.0
+        @test server_module._reward_score(7, true, logmixed) == 3.5
+        @test server_module._reward_score(12, true, logmixed; supersingular_excluded=true) == 0.0
+    end
+
+    @testset "Known polygons extend the reference" begin
+        codim8_key = "0;1/4;1/2;3/4;1;3/2;2;5/2;3;15/4;9/2;21/4;6"
+        @test !(codim8_key in server_module._load_reference_table(server_module.REFERENCE_PATH)[7])
+        @test codim8_key in server_module._load_reference_table(server_module.KNOWN_POLYGONS_PATH)[7]
+        @test codim8_key in server_module.REFERENCE_POLYGONS[7]
+        @test issubset(server_module._load_reference_table(server_module.REFERENCE_PATH)[11],
+                       server_module.REFERENCE_POLYGONS[11])
+
+        best = zeros(Int, 21)
+        best[[1, 6, 21]] .= 1
+        best[15] = 2
+        details = server_module._score_details("family=plane,d=5,p=7", best)
+        @test details.response["status"] == "OK"
+        @test details.codim == 8
+        @test details.novel == false
+        @test details.response["score"] == log2(9)
+        @test details.response["sig"][1:6] == [0.25, 0.5, 0.75, 1.0, 1.5, 2.0]
+        @test length(details.response["sig"]) == 7
+    end
+
+    @testset "Curve-aware signatures" begin
+        # x^2 y^3 term on Fermat, and the same curve after swapping x and y and
+        # rescaling y -> 2y, z -> 3z and the whole equation by 4.
+        p = 7
+        exponents = server_module.MONOMIAL_EXPONENTS
+        coefficient(vector, exponent) = vector[findfirst(==(exponent), exponents)]
+        curve = zeros(Int, 21)
+        curve[[1, 6, 21]] .= 1
+        curve[15] = 2
+        @test coefficient(curve, (2, 3, 0)) == 2
+        transformed = [mod(4 * coefficient(curve, (j, i, k)) * powermod(2, j, p) * powermod(3, k, p), p)
+                       for (i, j, k) in exponents]
+        @test transformed != curve
+        canonical = server_module._canonical_coefficients(p, curve)
+        @test server_module._canonical_coefficients(p, transformed) == canonical
+        @test canonical <= curve
+        @test findfirst(!iszero, canonical) !== nothing && canonical[findfirst(!iszero, canonical)] == 1
+
+        other = copy(curve)
+        other[15] = 0
+        other[14] = 2
+        @test server_module._canonical_coefficients(p, other) != canonical
+
+        id = server_module._curve_id(canonical)
+        @test isinteger(id) && 0 <= id < 2.0^52
+        @test id == server_module._curve_id(copy(canonical))
+
+        response = score_instance("family=plane,d=5,p=7", curve)
+        same = score_instance("family=plane,d=5,p=7", transformed)
+        @test response["status"] == same["status"] == "OK"
+        @test response["sig"] == same["sig"]
+        @test response["score"] == same["score"]
+        @test length(response["sig"]) <= 8
+        @test response["sig"][7] == id
+
+        # The default seed's curve: smooth and ordinary at p=7.
+        seed_curve = [4, 5, 3, 1, 4, 6, 4, 2, 1, 6, 4, 6, 5, 1, 1, 1, 1, 1, 3, 1, 4]
+        ordinary = score_instance("family=plane,d=5,p=7", seed_curve)
+        @test ordinary["status"] == "OK"
+        @test ordinary["sig"] == zeros(6)
     end
 
     @testset "Bounded request lines" begin
@@ -234,7 +304,7 @@ using Sockets
 
                 @test positive_response["status"] == "OK"
                 @test positive_response["score"] > 0.0
-                @test positive_response["sig"] == [0.5, 1.0, 1.5, 2.0, 2.5, 3.0]
+                @test positive_response["sig"][1:6] == [0.5, 1.0, 1.5, 2.0, 2.5, 3.0]
                 rows = readlines(curves_path)
                 @test rows[1] == "existing-run-line"
                 @test length(rows) == 3

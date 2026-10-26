@@ -17,7 +17,8 @@ include(joinpath(@__DIR__, "..", "..", "..", "src", "NewtonStrata.jl"))
 const MONOMIAL_EXPONENTS = [(i, j, 5 - i - j) for i in 0:5 for j in 0:(5 - i)]
 const GENUS = 6
 const REFERENCE_PATH = normpath(joinpath(@__DIR__, "..", "reference", "plane_quintic_newton_polygons.tsv"))
-const WARMUP_INSTANCE = "family=plane,d=5,p=7,reward=mixed,beta=0.5,eps=0.01,exclude_ss=true"
+const KNOWN_POLYGONS_PATH = normpath(joinpath(@__DIR__, "..", "reference", "known_plane_quintic_newton_polygons.tsv"))
+const WARMUP_INSTANCE = "family=plane,d=5,p=7,reward=logmixed,beta=0.5,eps=0.01,exclude_ss=true"
 const FERMAT_COEFFICIENTS = let coefficients = zeros(Int, 21)
     coefficients[[1, 6, 21]] .= 1
     coefficients
@@ -56,7 +57,62 @@ function _load_reference_table(path::AbstractString)
     polygons
 end
 
-const REFERENCE_POLYGONS = _load_reference_table(REFERENCE_PATH)
+# Novelty is judged against the Zenodo reference plus locally known polygons,
+# both read once at load so the bonus stays fixed for a run.
+const REFERENCE_POLYGONS = mergewith(
+    union,
+    _load_reference_table(REFERENCE_PATH),
+    _load_reference_table(KNOWN_POLYGONS_PATH),
+)
+
+const MONOMIAL_INDEX = Dict(exponent => index for (index, exponent) in enumerate(MONOMIAL_EXPONENTS))
+const VARIABLE_PERMUTATIONS = let maps = Vector{Int}[]
+    for order in ((1, 2, 3), (1, 3, 2), (2, 1, 3), (2, 3, 1), (3, 1, 2), (3, 2, 1))
+        push!(maps, [MONOMIAL_INDEX[(exponent[order[1]], exponent[order[2]], exponent[order[3]])]
+                     for exponent in MONOMIAL_EXPONENTS])
+    end
+    maps
+end
+
+"""
+Return the lexicographically least coefficient vector of the curve under the
+six variable permutations and the rescalings x, y, z -> a x, b y, c z, with
+the first nonzero coefficient scaled to one. Scaling all three variables by a
+only multiplies the equation by a^5, so fixing a = 1 covers every rescaling.
+"""
+function _canonical_coefficients(p::Int, coefficients::Vector{Int})
+    powers = [powermod(base, exponent, p) for base in 1:(p - 1), exponent in 0:5]
+    best = Int[]
+    permuted = similar(coefficients)
+    candidate = similar(coefficients)
+    for permutation in VARIABLE_PERMUTATIONS
+        permuted[permutation] .= coefficients
+        for b in 1:(p - 1), c in 1:(p - 1)
+            for (index, (_, j, k)) in enumerate(MONOMIAL_EXPONENTS)
+                candidate[index] = mod(widemul(permuted[index], powers[b, j + 1]) * powers[c, k + 1], p)
+            end
+            lead = invmod(candidate[findfirst(!iszero, candidate)], p)
+            candidate .= mod.(widemul.(candidate, lead), p)
+            if isempty(best) || candidate < best
+                best = copy(candidate)
+            end
+        end
+    end
+    best
+end
+
+"""
+Return a stable 52-bit identifier of a canonical coefficient vector: the top
+52 bits of its FNV-1a 64-bit hash, exact as a Float64 signature value.
+"""
+function _curve_id(canonical::Vector{Int})
+    state = 0xcbf29ce484222325
+    for byte in codeunits(join(canonical, ','))
+        state = (state ⊻ byte) * 0x00000100000001b3
+    end
+    Float64(state >> 12)
+end
+
 const LOAD_TIME_SECONDS = (time_ns() - LOAD_STARTED_NS) / 1.0e9
 
 struct InstanceConfig
@@ -69,7 +125,9 @@ end
 
 function _reward_score(codimension::Int, novel::Bool, config::InstanceConfig; supersingular_excluded=false)
     supersingular_excluded && return 0.0
-    if config.reward == "mixed"
+    if config.reward == "logmixed"
+        log2(1 + codimension) + config.beta * Int(novel)
+    elseif config.reward == "mixed"
         codimension + config.beta * Int(novel)
     elseif config.reward == "depth"
         Float64(codimension)
@@ -96,8 +154,8 @@ function _parse_instance(instance)
     p = tryparse(Int, get(fields, "p", ""))
     p === nothing && throw(ArgumentError("instance p must be an integer"))
     p >= 2 && Oscar.is_prime(p) || throw(ArgumentError("instance p must be prime"))
-    reward = get(fields, "reward", "mixed")
-    reward in ("mixed", "depth", "novelty") || throw(ArgumentError("unknown reward mode: $reward"))
+    reward = get(fields, "reward", "logmixed")
+    reward in ("logmixed", "mixed", "depth", "novelty") || throw(ArgumentError("unknown reward mode: $reward"))
     beta = tryparse(Float64, get(fields, "beta", "0.5"))
     eps = tryparse(Float64, get(fields, "eps", "0.01"))
     beta !== nothing && isfinite(beta) && beta >= 0 || throw(ArgumentError("beta must be a finite nonnegative number"))
@@ -121,6 +179,7 @@ function _invalid_details(message; p=nothing, coefficients=nothing)
         polygon=nothing,
         codim=nothing,
         novel=nothing,
+        canonical=nothing,
         reward=0.0,
     )
 end
@@ -139,6 +198,7 @@ function _error_details(message; p=nothing, coefficients=nothing)
         polygon=nothing,
         codim=nothing,
         novel=nothing,
+        canonical=nothing,
         reward=0.0,
     )
 end
@@ -240,6 +300,10 @@ function _score_details(instance, coefficients; curve_builder=_build_curve, poly
     supersingular_excluded = config.exclude_ss && NewtonStrata.is_supersingular(polygon)
     reward = _reward_score(codimension, novel, config; supersingular_excluded=supersingular_excluded)
     signature = Float64[Float64(NewtonStrata.polygon_value(polygon, x)) for x in 1:GENUS]
+    # Ordinary curves are grouped by polygon alone; every other curve also
+    # carries its canonical-form id, so only an equivalent curve is a duplicate.
+    canonical = _canonical_coefficients(config.p, parsed_coefficients)
+    NewtonStrata.is_ordinary(polygon) || push!(signature, _curve_id(canonical))
     message = supersingular_excluded ? "supersingular (excluded)" : ""
     response = Dict{String,Any}(
         "status" => "OK",
@@ -254,6 +318,7 @@ function _score_details(instance, coefficients; curve_builder=_build_curve, poly
         polygon=polygon,
         codim=codimension,
         novel=novel,
+        canonical=canonical,
         reward=Float64(reward),
     )
 end
@@ -268,6 +333,7 @@ function _retention_record(details, request, elapsed_seconds)
         "program_id" => get(request, "program_id", nothing),
         "p" => details.p,
         "coeffs" => details.coefficients,
+        "canonical_coeffs" => details.canonical,
         "instance" => get(request, "instance", nothing),
         "status" => details.response["status"],
         "slopes" => polygon === nothing ? nothing : _format_ratio.(polygon.slopes),
@@ -478,6 +544,7 @@ function _ready_record(warmup_seconds::Float64, warmup_response, precision)
         "DeRham_path" => source_path,
         "DeRham_commit" => commit,
         "precision_provenance" => precision,
+        "reference_tables" => [REFERENCE_PATH, KNOWN_POLYGONS_PATH],
         "peak_rss_bytes" => Int(Sys.maxrss()),
         "sysimage" => get(ENV, "KAIMON_CITY_SYSIMAGE", "off"),
         "julia_image_file" => unsafe_string(Base.JLOptions().image_file),

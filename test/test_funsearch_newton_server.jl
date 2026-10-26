@@ -181,8 +181,8 @@ using Sockets
     end
 
     @testset "Curve-aware signatures" begin
-        # x^2 y^3 term on Fermat, and the same curve after swapping x and y and
-        # rescaling y -> 2y, z -> 3z and the whole equation by 4.
+        # x^2 y^3 term on Fermat, transformed under all six variable
+        # permutations, plus rescaling y -> 2y, z -> 3z and the equation by 4.
         p = 7
         exponents = server_module.MONOMIAL_EXPONENTS
         coefficient(vector, exponent) = vector[findfirst(==(exponent), exponents)]
@@ -190,13 +190,17 @@ using Sockets
         curve[[1, 6, 21]] .= 1
         curve[15] = 2
         @test coefficient(curve, (2, 3, 0)) == 2
-        transformed = [mod(4 * coefficient(curve, (j, i, k)) * powermod(2, j, p) * powermod(3, k, p), p)
-                       for (i, j, k) in exponents]
-        @test transformed != curve
         canonical = server_module._canonical_coefficients(p, curve)
-        @test server_module._canonical_coefficients(p, transformed) == canonical
         @test canonical <= curve
         @test findfirst(!iszero, canonical) !== nothing && canonical[findfirst(!iszero, canonical)] == 1
+
+        orders = ((1, 2, 3), (1, 3, 2), (2, 1, 3), (2, 3, 1), (3, 1, 2), (3, 2, 1))
+        transformed_curves = [[mod(4 * coefficient(curve, (exponent[order[1]], exponent[order[2]], exponent[order[3]])) *
+                                   powermod(2, exponent[2], p) * powermod(3, exponent[3], p), p)
+                               for exponent in exponents] for order in orders]
+        @test all(transformed -> transformed != curve, transformed_curves)
+        @test all(server_module._canonical_coefficients(p, transformed) == canonical
+                  for transformed in transformed_curves)
 
         other = copy(curve)
         other[15] = 0
@@ -208,6 +212,7 @@ using Sockets
         @test id == server_module._curve_id(copy(canonical))
 
         response = score_instance("family=plane,d=5,p=7", curve)
+        transformed = transformed_curves[2]
         same = score_instance("family=plane,d=5,p=7", transformed)
         @test response["status"] == same["status"] == "OK"
         @test response["sig"] == same["sig"]
@@ -217,9 +222,11 @@ using Sockets
 
         # The default seed's curve: smooth and ordinary at p=7.
         seed_curve = [4, 5, 3, 1, 4, 6, 4, 2, 1, 6, 4, 6, 5, 1, 1, 1, 1, 1, 3, 1, 4]
-        ordinary = score_instance("family=plane,d=5,p=7", seed_curve)
+        ordinary_details = server_module._score_details("family=plane,d=5,p=7", seed_curve)
+        ordinary = ordinary_details.response
         @test ordinary["status"] == "OK"
         @test ordinary["sig"] == zeros(6)
+        @test ordinary_details.canonical === nothing
     end
 
     @testset "Bounded request lines" begin
@@ -321,6 +328,7 @@ using Sockets
                 @test positive_record["status"] == "OK"
                 @test positive_record["codim"] > 0
                 @test positive_record["reward"] > 0.0
+                @test positive_record["canonical_coeffs"] == server_module._canonical_coefficients(7, fermat)
             finally
                 server_module.stop_server(server)
             end

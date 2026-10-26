@@ -302,8 +302,13 @@ function _score_details(instance, coefficients; curve_builder=_build_curve, poly
     signature = Float64[Float64(NewtonStrata.polygon_value(polygon, x)) for x in 1:GENUS]
     # Ordinary curves are grouped by polygon alone; every other curve also
     # carries its canonical-form id, so only an equivalent curve is a duplicate.
-    canonical = _canonical_coefficients(config.p, parsed_coefficients)
-    NewtonStrata.is_ordinary(polygon) || push!(signature, _curve_id(canonical))
+    # Skip the quadratic scaling-orbit search for ordinary curves: their
+    # duplicate signature does not use the canonical form.
+    canonical = nothing
+    if !NewtonStrata.is_ordinary(polygon)
+        canonical = _canonical_coefficients(config.p, parsed_coefficients)
+        push!(signature, _curve_id(canonical))
+    end
     message = supersingular_excluded ? "supersingular (excluded)" : ""
     response = Dict{String,Any}(
         "status" => "OK",

@@ -54,9 +54,15 @@ experiments/funsearch-newton/server/run_funsearch.sh run \
   --instance 'family=plane,d=5,p=7,reward=mixed,beta=0.5,eps=0.01,exclude_ss=true'
 ~~~
 
-The launcher starts the server before funsearch run start, then uses the run's
-start and finish hooks to move the preflight curve log into the run, retain
-server-ready.json and server.log, and stop the server at completion. The run
-directory is created only by FunSearch; a pending log path under runs/ lets the
-seed preflight be retained without claiming the run id early. The evaluator
-logs its fs_init connection time to worker stderr.
+The launcher starts the score server before funsearch run start. Its on-start
+hook attaches the pending curve log and server metadata to the run, then invokes
+the pack's scripts/on-start.sh. If that hook fails, FunSearch fails the run and
+still runs the on-finish hook. The on-finish hook invokes the pack's
+scripts/on-finish.sh and then always stops the server; it fails if either step
+failed. Launcher cleanup removes pending files after any failure. FunSearch creates the run directory, while
+pending paths under runs/ retain preflight artifacts without claiming the run
+id early. The evaluator logs its fs_init connection time to worker stderr.
+
+On macOS, pass the evaluator's Julia library directory through
+`FS_DYLD_LIBRARY_PATH`. The bash shebang strips `DYLD_*` variables, so this
+requires a FunSearch pack with the `mx-44ng9` carrier support.

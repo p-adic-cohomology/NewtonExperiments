@@ -12,12 +12,12 @@ An instance is a comma-separated string with these fields:
 - family: plane
 - d: 5
 - p: a prime
-- reward: mixed, depth, or novelty
-- beta: nonnegative finite bonus for mixed reward
+- reward: logmixed, mixed, depth, or novelty
+- beta: nonnegative finite bonus for logmixed and mixed reward
 - eps: nonnegative finite weight for depth under novelty reward
 - exclude_ss: true or false
 
-The defaults are plane quintics, mixed reward, beta 0.5, eps 0.01, and
+The defaults are plane quintics, logmixed reward, beta 0.5, eps 0.01, and
 excluding supersingular curves. The first configured prime is 7.
 
 The candidate exports one function with the prototype in candidate.h. It fills
@@ -31,24 +31,31 @@ resulting homogeneous polynomial must define a smooth projective curve.
 For genus 6, the evaluator computes the Newton polygon and its stratum
 codimension in the moduli space of principally polarized abelian varieties.
 The codimension is 21 minus sdim, where sdim counts the integer lattice pairs
-(x,y) with 0 <= y < x <= 6 that lie on or above the polygon. The mixed reward
-is codimension plus beta times a binary novelty bonus. The depth reward is
+(x,y) with 0 <= y < x <= 6 that lie on or above the polygon. The logmixed
+reward is log2(1 + codimension) plus beta times a binary novelty bonus. The
+mixed reward is codimension plus beta times the same bonus. The depth reward is
 codimension. The novelty reward is the novelty bonus plus eps times
 codimension. A polygon is novel when its integer-abscissa values are not in
-the reference set for that prime.
+the reference set for that prime: the published data plus locally known
+polygons, fixed for the run.
 
 The evaluator independently constructs and checks the curve. Invalid
 coefficients and singular curves receive INVALID. An evaluation failure
 receives ERROR. Only a successfully computed polygon receives OK. The signature
-contains the polygon values at integer abscissas 1 through 6; it groups similar
-outputs and does not affect ranking.
+contains the polygon values at integer abscissas 1 through 6. For a curve that
+is not ordinary, it also contains an identifier of the curve up to permuting
+and rescaling the variables. A child with the same score and signature as a
+stored program is a duplicate, so every ordinary curve duplicates any other,
+while inequivalent non-ordinary curves are kept (the identifier is a 52-bit
+hash, so a collision is possible but very unlikely). The signature does not
+affect ranking.
 
 ## Starting candidates
 
 The default seed is a fixed deterministic pseudo-random coefficient vector.
 Alternative seeds are kept under seeds/; to use one, copy it to seed.c before
 checking or starting a run. At p=7 the default seed is smooth and ordinary, so
-it scores 0 under the default mixed reward. Runs retain their own copy of the
+it scores 0 under the default logmixed reward. Runs retain their own copy of the
 selected seed.
 
 ## Public constraints

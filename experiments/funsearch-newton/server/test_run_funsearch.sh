@@ -3,7 +3,10 @@ set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 LAUNCHER="$SCRIPT_DIR/run_funsearch.sh"
+# Resolve the root physically so expected paths match the run directories the
+# mock engine reports, even when TMPDIR ends in a slash or is a symlink.
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/funsearch-launcher-test.XXXXXX")
+TMP_ROOT=$(cd "$TMP_ROOT" && pwd -P)
 trap 'rm -rf "$TMP_ROOT"' EXIT
 
 PROBLEM_DIR="$TMP_ROOT/problem"
@@ -85,7 +88,8 @@ if mode == "fail-before-start-hook":
 
 run_dir = problem / "runs" / run_id
 run_dir.mkdir(parents=True)
-pending_curves.touch()
+# Stand in for a scored request so the test can check the log survives attach.
+pending_curves.write_text('{"status": "OK"}\n')
 if mode == "fail-attach":
     pending_curves.unlink()
 quoted_run_dir = shlex.quote(str(run_dir))

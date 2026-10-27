@@ -46,8 +46,9 @@ contains the polygon values at integer abscissas 1 through 6. For a curve that
 is not ordinary, it also contains an identifier of the curve up to permuting
 and rescaling the variables. A child with the same score and signature as a
 stored program is a duplicate, so every ordinary curve duplicates any other,
-while distinct non-ordinary curves are kept. The signature does not affect
-ranking.
+while inequivalent non-ordinary curves are kept (the identifier is a 52-bit
+hash, so a collision is possible but very unlikely). The signature does not
+affect ranking.
 
 ## Starting candidates
 

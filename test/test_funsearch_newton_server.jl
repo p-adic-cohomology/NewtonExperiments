@@ -220,6 +220,19 @@ using Sockets
         @test length(response["sig"]) <= 8
         @test response["sig"][7] == id
 
+        # Fermat + 3x^2y^3 has the same codim-8 polygon at p=7 but is not
+        # equivalent under permutations and rescalings, so it must not be a
+        # duplicate of the curve above.
+        inequivalent = copy(curve)
+        inequivalent[15] = 3
+        @test server_module._canonical_coefficients(p, inequivalent) != canonical
+        distinct = score_instance("family=plane,d=5,p=7", inequivalent)
+        @test distinct["status"] == "OK"
+        @test distinct["score"] == response["score"]
+        @test distinct["sig"][1:6] == response["sig"][1:6]
+        @test length(distinct["sig"]) == 7
+        @test distinct["sig"][7] != response["sig"][7]
+
         # The default seed's curve: smooth and ordinary at p=7.
         seed_curve = [4, 5, 3, 1, 4, 6, 4, 2, 1, 6, 4, 6, 5, 1, 1, 1, 1, 1, 3, 1, 4]
         ordinary_details = server_module._score_details("family=plane,d=5,p=7", seed_curve)
@@ -227,6 +240,9 @@ using Sockets
         @test ordinary["status"] == "OK"
         @test ordinary["sig"] == zeros(6)
         @test ordinary_details.canonical === nothing
+        ordinary_row = JSON.parse(JSON.json(server_module._retention_record(ordinary_details, Dict{String,Any}(), 0.0)))
+        @test haskey(ordinary_row, "canonical_coeffs")
+        @test ordinary_row["canonical_coeffs"] === nothing
     end
 
     @testset "Bounded request lines" begin

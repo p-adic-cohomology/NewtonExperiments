@@ -17,7 +17,7 @@ fi
 MODE=$1
 PROBLEM_DIR=$(cd "$2" && pwd)
 shift 2
-INSTANCE="family=plane,d=5,p=7,reward=logmixed,beta=0.5,eps=0.01,exclude_ss=true"
+INSTANCE="family=plane,d=5,p=7,k=16,curve_reward=log,lambda=0.25,beta=0.5,ss_codim=1"
 RUN_ID=""
 RUN_OPTIONS=()
 

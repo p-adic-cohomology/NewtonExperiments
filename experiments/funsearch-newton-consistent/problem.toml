@@ -1,6 +1,6 @@
 [problem]
 name = "Newton polygons of plane quintics"
-instance = "family=plane,d=5,p=7,reward=logmixed,beta=0.5,eps=0.01,exclude_ss=true"
+instance = "family=plane,d=5,p=7,k=16,curve_reward=log,lambda=0.25,beta=0.5,ss_codim=1"
 
 [candidate]
 language = "c"
@@ -11,8 +11,7 @@ exports = ["curve"]
 [evaluator]
 build = 'make -C evaluator FS_PACK="${FUNSEARCH_PACK:-/Users/Shared/Developer/ai/city/math-city/packs/funsearch}"'
 library = "evaluator/libevaluator.so"
-# Initial per-candidate limits; the run-readiness work finalizes them from measurements.
-timeout_s = 30
+timeout_s = 90
 memory_mb = 512
 env = ["FUNSEARCH_NEWTON_SOCKET"]
 

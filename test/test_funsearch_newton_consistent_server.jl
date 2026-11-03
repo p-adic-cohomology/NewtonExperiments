@@ -234,6 +234,35 @@ end
         @test no_supersingular_reward.response["score"] ≈ 2.7
     end
 
+    @testset "Repeated coefficient vectors reuse successful scoring" begin
+        curve_calls = Ref(0)
+        zeta_calls = Ref(0)
+        polygon_calls = Ref(0)
+        curve_builder = (p, coefficients) -> (curve_calls[] += 1; coefficients[1])
+        zeta_builder = (curve; kwargs...) -> (zeta_calls[] += 1; [curve])
+        polygon_builder = (p, zeta) -> (polygon_calls[] += 1; stubs.polygon_builder(p, zeta))
+        first_curve = tagged_coefficients(1)
+        second_curve = tagged_coefficients(2)
+        details = server_module._score_details(
+            test_instance(7; k=4, lambda=0, beta=0),
+            [first_curve, copy(first_curve), second_curve, copy(second_curve)];
+            curve_builder=curve_builder,
+            zeta_builder=zeta_builder,
+            polygon_builder=polygon_builder,
+            reference_polygons=stubs.reference,
+        )
+
+        @test details.response["status"] == "OK"
+        @test (curve_calls[], zeta_calls[], polygon_calls[]) == (2, 2, 2)
+        @test [sample.k for sample in details.samples] == collect(0:3)
+        @test details.samples[2].duplicate_of == 0
+        @test details.samples[4].duplicate_of == 2
+        @test details.samples[2].coefficients == details.samples[1].coefficients
+        @test details.samples[2].coefficients !== details.samples[1].coefficients
+        @test details.samples[2].reward == 0.0
+        @test details.samples[4].reward == 0.0
+    end
+
     @testset "Invalid and failed samples" begin
         valid = tagged_coefficients(1)
         invalid = zeros(Int, 21)
@@ -448,6 +477,93 @@ end
             end
             @test !ispath(socket_path)
             @test !ispath(ready_path)
+        end
+    end
+
+    @testset "Concurrent real score servers retain complete batches" begin
+        mktempdir() do directory
+            repository = normpath(joinpath(@__DIR__, ".."))
+            server_script = joinpath(repository, "experiments", "funsearch-newton-consistent", "server", "score_server.jl")
+            curves_path = joinpath(directory, "curves.jsonl")
+            socket_paths = [joinpath(directory, "score-$index.sock") for index in 1:2]
+            ready_paths = [joinpath(directory, "ready-$index.json") for index in 1:2]
+            log_paths = [joinpath(directory, "server-$index.log") for index in 1:2]
+            server_processes = Any[]
+            server_logs = IO[]
+            try
+                for index in 1:2
+                    log = open(log_paths[index], "w")
+                    push!(server_logs, log)
+                    command = `$(Base.julia_cmd()) --threads=1 --project=$repository $server_script --socket $(socket_paths[index]) --ready-file $(ready_paths[index]) --curves $curves_path`
+                    push!(server_processes, run(pipeline(command, stdout=log, stderr=log); wait=false))
+                end
+
+                deadline = time() + 180
+                while time() < deadline && !all(isfile, ready_paths)
+                    any(process -> !process_running(process), server_processes) && break
+                    sleep(0.1)
+                end
+                ready = all(path -> isfile(path) && filesize(path) > 0, ready_paths)
+                @test ready
+                if !ready
+                    foreach(flush, server_logs)
+                    error("score-server children failed to become ready: " * join(read.(log_paths, String), "\n"))
+                end
+                @test all(JSON.parse(read(path, String))["thread_count"] == 1 for path in ready_paths)
+
+                batch_size = 16
+                instance = test_instance(7; k=batch_size, lambda=0, beta=0)
+                program_ids = [repeat("x", 8192) * "-server-$index" for index in 1:2]
+                submit = function (socket_path, program_id)
+                    connection = Sockets.connect(socket_path)
+                    try
+                        request = Dict{String,Any}(
+                            "program_id" => program_id,
+                            "instance" => instance,
+                            "samples" => [copy(server_module.FERMAT_COEFFICIENTS) for _ in 1:batch_size],
+                        )
+                        write(connection, JSON.json(request))
+                        write(connection, '\n')
+                        flush(connection)
+                        JSON.parse(readline(connection))
+                    finally
+                        close(connection)
+                    end
+                end
+                requests = Task[]
+                for index in 1:2
+                    push!(requests, @async submit(socket_paths[index], program_ids[index]))
+                end
+                responses = fetch.(requests)
+                @test all(response["status"] == "OK" for response in responses)
+
+                records = JSON.parse.(readlines(curves_path))
+                @test length(records) == 2 * batch_size
+                @test Set(record["program_id"] for record in records) == Set(program_ids)
+                groups = Vector{Any}[]
+                for record in records
+                    if isempty(groups) || last(last(groups))["batch_id"] != record["batch_id"]
+                        push!(groups, Any[])
+                    end
+                    push!(last(groups), record)
+                end
+                @test length(groups) == 2
+                for group in groups
+                    @test length(group) == batch_size
+                    @test length(Set(record["batch_id"] for record in group)) == 1
+                    @test length(Set(record["program_id"] for record in group)) == 1
+                    @test [record["k"] for record in group] == collect(0:(batch_size - 1))
+                end
+            finally
+                for process in server_processes
+                    process_running(process) && kill(process)
+                    try
+                        wait(process)
+                    catch
+                    end
+                end
+                foreach(close, filter(isopen, server_logs))
+            end
         end
     end
 

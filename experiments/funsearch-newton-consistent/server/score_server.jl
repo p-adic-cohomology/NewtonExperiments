@@ -466,6 +466,32 @@ function _score_message(score::Float64, distinct::Int, k::Int, tokens)
     join(parts, " ")
 end
 
+function _coefficient_cache_key(raw_coefficients, p::Int)
+    raw_coefficients isa AbstractVector || return nothing
+    length(raw_coefficients) == length(MONOMIAL_EXPONENTS) || return nothing
+    all(value -> value isa Integer && !(value isa Bool), raw_coefficients) || return nothing
+    coefficients = try
+        Int[value for value in raw_coefficients]
+    catch
+        return nothing
+    end
+    all(value -> 0 <= value < p, coefficients) || return nothing
+    any(!iszero, coefficients) || return nothing
+    Tuple(coefficients)
+end
+
+function _copy_cached_sample(sample, k::Int)
+    merge(
+        sample,
+        (
+            k=k,
+            coefficients=sample.coefficients === nothing ? nothing : copy(sample.coefficients),
+            zeta=sample.zeta === nothing ? nothing : copy(sample.zeta),
+            canonical=sample.canonical === nothing ? nothing : copy(sample.canonical),
+        ),
+    )
+end
+
 function _score_details(
     instance,
     raw_samples;
@@ -487,18 +513,28 @@ function _score_details(
             p=config.p,
         )
 
-    results = Any[
-        _score_sample(
+    sample_cache = Dict{Tuple,Any}()
+    results = Any[]
+    sizehint!(results, length(raw_samples))
+    for index in eachindex(raw_samples)
+        raw_coefficients = raw_samples[index]
+        cache_key = _coefficient_cache_key(raw_coefficients, config.p)
+        if cache_key !== nothing && haskey(sample_cache, cache_key)
+            push!(results, _copy_cached_sample(sample_cache[cache_key], index - 1))
+            continue
+        end
+        sample = _score_sample(
             config,
-            raw_samples[index],
+            raw_coefficients,
             index - 1;
             curve_builder=curve_builder,
             zeta_builder=zeta_builder,
             polygon_builder=polygon_builder,
             reference_polygons=reference_polygons,
         )
-        for index in eachindex(raw_samples)
-    ]
+        push!(results, sample)
+        cache_key !== nothing && sample.status == "OK" && (sample_cache[cache_key] = sample)
+    end
     first_by_key = Dict{UInt64,Int}()
     distinct_keys = UInt64[]
     nonordinary_keys = Set{UInt64}()

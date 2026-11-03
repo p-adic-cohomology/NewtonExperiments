@@ -8,11 +8,11 @@ extern "C" {
 #endif
 
 /**
- * Fill the 21 degree-five monomial coefficients over F_p.
- * Entry k corresponds to x^i y^j z^(5-i-j), ordered by increasing i and then j.
- * Every entry must be in [0, p), and the vector must not be all zero.
+ * Generate the k-th degree-five curve over F_p.
+ * Coefficient entries correspond to x^i y^j z^(5-i-j), ordered by increasing i and then j.
+ * Each output depends only on p and k. Invalid samples are scored as zero.
  */
-void curve(int32_t p, int32_t coeffs[21]);
+void curve(int32_t p, int32_t k, int32_t coeffs[21]);
 
 #ifdef __cplusplus
 }

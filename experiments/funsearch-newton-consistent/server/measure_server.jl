@@ -48,12 +48,12 @@ function _measure(samples)
     warmup_started_ns = time_ns()
     warmup = FunSearchNewtonConsistentServer.score_instance(
         FunSearchNewtonConsistentServer.WARMUP_INSTANCE,
-        FunSearchNewtonConsistentServer.FERMAT_COEFFICIENTS,
+        [FunSearchNewtonConsistentServer.FERMAT_COEFFICIENTS],
     )
     warmup_seconds = (time_ns() - warmup_started_ns) / 1.0e9
     warmup["status"] == "OK" || throw(ErrorException("warm-up failed: $(warmup["msg"])"))
 
-    instance = "family=plane,d=5,p=7,reward=mixed,beta=0.5,eps=0.01,exclude_ss=true"
+    instance = "family=plane,d=5,p=7,k=1,curve_reward=log,beta=0.5,lambda=0.25,ss_codim=1"
     elapsed = Float64[]
     attempts = 0
     last_reported = 0
@@ -62,7 +62,7 @@ function _measure(samples)
         attempts += 1
         coefficients = rand(0:6, 21)
         started_ns = time_ns()
-        response = FunSearchNewtonConsistentServer.score_instance(instance, coefficients)
+        response = FunSearchNewtonConsistentServer.score_instance(instance, [coefficients])
         seconds = (time_ns() - started_ns) / 1.0e9
         _record_measurement_sample!(elapsed, response, seconds)
         if length(elapsed) >= last_reported + 5

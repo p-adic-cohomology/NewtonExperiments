@@ -4,565 +4,401 @@ include(joinpath(@__DIR__, "..", "experiments", "funsearch-newton-consistent", "
 using .FunSearchNewtonConsistentServer
 using .FunSearchNewtonConsistentMeasureServer
 using JSON
+using Random
 using Sockets
+using Test
 
-@testset "FunSearch Newton score server" begin
-    server_module = FunSearchNewtonConsistentServer
-    fermat = server_module.FERMAT_COEFFICIENTS
-    instance(p; exclude_ss=true) = "family=plane,d=5,p=$p,reward=mixed,beta=0.5,eps=0.01,exclude_ss=$exclude_ss"
-    function request_line(socket_path, line)
-        connection = Sockets.connect(socket_path)
-        try
-            write(connection, line)
-            write(connection, '\n')
-            flush(connection)
-            JSON.parse(readline(connection))
-        finally
-            close(connection)
-        end
-    end
+const server_module = FunSearchNewtonConsistentServer
+const strata = server_module.NewtonStrata
 
-    @test length(server_module.MONOMIAL_EXPONENTS) == 21
-    @test [collect(exponent) for exponent in server_module.MONOMIAL_EXPONENTS] == DeRham.gen_exp_vec(3, 5, :lex)
-    @test fermat[[1, 6, 21]] == [1, 1, 1]
-    @test server_module._server_arguments(["--socket", "score.sock", "--ready-file", "ready.json", "--curves", "curves.jsonl"]) == Dict(
-        "socket" => "score.sock",
-        "ready-file" => "ready.json",
-        "curves" => "curves.jsonl",
+function test_instance(p; k=16, curve_reward="log", lambda=0.25, beta=0.5, ss_codim=1)
+    "family=plane,d=5,p=$p,k=$k,curve_reward=$curve_reward,lambda=$lambda,beta=$beta,ss_codim=$ss_codim"
+end
+
+function tagged_coefficients(tag, p=7)
+    coefficients = zeros(Int, 21)
+    coefficients[1] = tag
+    coefficients[6] = mod(tag + 1, p)
+    coefficients[21] = mod(tag + 2, p)
+    coefficients
+end
+
+function test_polygons()
+    polygons = strata.enumerate_symmetric_polygons(6)
+    ordinary = first(polygon for polygon in polygons if strata.is_ordinary(polygon))
+    supersingular = first(polygon for polygon in polygons if strata.is_supersingular(polygon))
+    codim_two = first(
+        polygon for polygon in polygons
+        if strata.codim(polygon) == 2 && !strata.is_supersingular(polygon)
     )
+    codim_four = first(
+        polygon for polygon in polygons
+        if strata.codim(polygon) == 4 && !strata.is_supersingular(polygon)
+    )
+    (ordinary=ordinary, supersingular=supersingular, codim_two=codim_two, codim_four=codim_four)
+end
 
-    @testset "Invalid startup arguments" begin
-        @test_throws ArgumentError server_module._server_arguments(["--unknown", "value"])
-        @test_throws ArgumentError server_module._server_arguments(["--socket"])
-        withenv(
-            "FUNSEARCH_NEWTON_SOCKET" => nothing,
-            "FUNSEARCH_NEWTON_READY" => nothing,
-            "FUNSEARCH_NEWTON_CURVES" => nothing,
-        ) do
-            @test_throws ArgumentError server_module._server_arguments(String[])
+function polygon_key(polygon)
+    server_module._polygon_key(strata.integer_values(polygon))
+end
+
+function stub_builders(polygons)
+    by_id = Dict(
+        1 => polygons.codim_two,
+        2 => polygons.supersingular,
+        3 => polygons.codim_four,
+        4 => polygons.ordinary,
+    )
+    known = Set([polygon_key(polygons.codim_two), polygon_key(polygons.supersingular), polygon_key(polygons.ordinary)])
+    reference = Dict(7 => known)
+    curve_builder = (p, coefficients) -> coefficients[1]
+    zeta_builder = (curve; kwargs...) -> [curve]
+    polygon_builder = (p, zeta) -> by_id[Int(first(zeta))]
+    (curve_builder=curve_builder, zeta_builder=zeta_builder, polygon_builder=polygon_builder, reference=reference)
+end
+
+function polynomial_multiply(a, b, p)
+    result = Dict{NTuple{3,Int},Int}()
+    for (exponent_a, coefficient_a) in a, (exponent_b, coefficient_b) in b
+        exponent = ntuple(index -> exponent_a[index] + exponent_b[index], 3)
+        result[exponent] = mod(get(result, exponent, 0) + coefficient_a * coefficient_b, p)
+    end
+    result
+end
+
+function polynomial_power(polynomial, exponent, p)
+    result = Dict((0, 0, 0) => 1)
+    for _ in 1:exponent
+        result = polynomial_multiply(result, polynomial, p)
+    end
+    result
+end
+
+function linear_form(matrix, row, p)
+    result = Dict{NTuple{3,Int},Int}()
+    for column in 1:3
+        coefficient = mod(matrix[row, column], p)
+        coefficient == 0 && continue
+        exponent = ntuple(index -> index == column ? 1 : 0, 3)
+        result[exponent] = coefficient
+    end
+    result
+end
+
+function transform_curve(coefficients, matrix, p)
+    forms = [linear_form(matrix, row, p) for row in 1:3]
+    powers = [[polynomial_power(forms[row], exponent, p) for exponent in 0:5] for row in 1:3]
+    result = Dict{NTuple{3,Int},Int}()
+    for (index, (i, j, k)) in enumerate(server_module.MONOMIAL_EXPONENTS)
+        term = polynomial_multiply(
+            polynomial_multiply(powers[1][i + 1], powers[2][j + 1], p),
+            powers[3][k + 1],
+            p,
+        )
+        for (exponent, coefficient) in term
+            result[exponent] = mod(get(result, exponent, 0) + coefficients[index] * coefficient, p)
+        end
+    end
+    [get(result, exponent, 0) for exponent in server_module.MONOMIAL_EXPONENTS]
+end
+
+function determinant_mod(matrix, p)
+    mod(
+        matrix[1, 1] * (matrix[2, 2] * matrix[3, 3] - matrix[2, 3] * matrix[3, 2]) -
+        matrix[1, 2] * (matrix[2, 1] * matrix[3, 3] - matrix[2, 3] * matrix[3, 1]) +
+        matrix[1, 3] * (matrix[2, 1] * matrix[3, 2] - matrix[2, 2] * matrix[3, 1]),
+        p,
+    )
+end
+
+function random_invertible_matrix(rng, p)
+    while true
+        matrix = rand(rng, 0:(p - 1), 3, 3)
+        determinant_mod(matrix, p) != 0 && return matrix
+    end
+end
+
+function random_nonordinary_curve(p, rng)
+    for _ in 1:100
+        coefficients = rand(rng, 0:(p - 1), 21)
+        any(!iszero, coefficients) || continue
+        details = server_module._score_details(test_instance(p; k=1), [coefficients])
+        sample = only(details.samples)
+        details.response["status"] == "OK" && sample.codim > 0 && return coefficients
+    end
+    error("failed to find a smooth nonordinary curve at p=$p")
+end
+
+@testset "Consistent FunSearch Newton server" begin
+    polygons = test_polygons()
+    stubs = stub_builders(polygons)
+
+    @testset "Instance grammar and defaults" begin
+        defaults = server_module._parse_instance("family=plane,d=5,p=7")
+        @test defaults.k == 16
+        @test defaults.curve_reward == "log"
+        @test defaults.lambda == 0.25
+        @test defaults.beta == 0.5
+        @test defaults.ss_codim == 1
+        @test server_module._parse_instance("p=7,k=1").k == 1
+        @test server_module._parse_instance("p=7,k=64").k == 64
+        for invalid in ("p=7,k=0", "p=7,k=65", "p=7,curve_reward=depth", "p=7,lambda=-1",
+                        "p=7,lambda=Inf", "p=7,beta=NaN", "p=7,ss_codim=-1", "p=7,ss_codim=13")
+            @test_throws ArgumentError server_module._parse_instance(invalid)
+        end
+        @test_throws ArgumentError server_module._parse_instance("p=7,k=1,k=2")
+        @test_throws ArgumentError server_module._parse_instance("p=7,unknown=1")
+        for (field, replacement) in (("reward=mixed", "curve_reward"), ("eps=0.01", "none"),
+                                     ("exclude_ss=true", "ss_codim"))
+            error = try
+                server_module._parse_instance("p=7,$field")
+                nothing
+            catch caught
+                caught
+            end
+            @test error isa ArgumentError
+            @test occursin(replacement, sprint(showerror, error))
         end
     end
 
-    @testset "Invalid inputs" begin
-        response = score_instance(instance(7), zeros(Int, 21))
-        @test response["status"] == "INVALID"
-        @test response["score"] == 0.0
-        @test occursin("zero polynomial", response["msg"])
-        @test score_instance(instance(7), zeros(Int, 20))["status"] == "INVALID"
-        out_of_range = copy(fermat)
-        out_of_range[1] = 7
-        @test score_instance(instance(7), out_of_range)["status"] == "INVALID"
-        @test score_instance("family=plane,d=5,p=4", fermat)["status"] == "INVALID"
-
-        invalid_instances = [
-            ("family=plane,d=5,p=7,broken", "invalid instance field"),
-            ("family=plane,d=5,p=7,p=11", "duplicate instance field"),
-            ("family=plane,d=5,p=7,rewrd=depth", "unknown instance field: rewrd"),
-            ("family=affine,d=5,p=7", "only family=plane is supported"),
-            ("family=plane,d=4,p=7", "only degree d=5 is supported"),
-            ("family=plane,d=5,p=7,reward=unknown", "unknown reward mode"),
-            ("family=plane,d=5,p=7,beta=not-a-number", "beta must be"),
-            ("family=plane,d=5,p=7,beta=-1", "beta must be"),
-            ("family=plane,d=5,p=7,eps=NaN", "eps must be"),
-            ("family=plane,d=5,p=7,eps=-1", "eps must be"),
-            ("family=plane,d=5,p=7,exclude_ss=maybe", "exclude_ss must be"),
+    @testset "K-sample score, zeta dedupe, and signature" begin
+        samples = [
+            tagged_coefficients(1),
+            tagged_coefficients(1),
+            tagged_coefficients(2),
+            tagged_coefficients(3),
+            tagged_coefficients(4),
         ]
-        for (invalid_instance, expected_message) in invalid_instances
-            response = score_instance(invalid_instance, fermat)
-            @test response["status"] == "INVALID"
-            @test occursin(expected_message, response["msg"])
-        end
+        details = server_module._score_details(
+            test_instance(7; k=5),
+            samples;
+            curve_builder=stubs.curve_builder,
+            zeta_builder=stubs.zeta_builder,
+            polygon_builder=stubs.polygon_builder,
+            reference_polygons=stubs.reference,
+        )
+        response = details.response
+        mean_term = (log2(3) + 1 + log2(5)) / 5
+        expected_score = mean_term + 0.25 * log2(5) + 0.5
+        @test response["status"] == "OK"
+        @test response["score"] ≈ expected_score
+        @test response["sig"][1] ≈ mean_term
+        @test response["sig"][2] ≈ log2(5)
+        @test response["sig"][3] == 4 / 5
+        @test response["sig"][4] == 3 / 5
+        @test details.samples[2].duplicate_of == 0
+        @test details.samples[2].reward == 0.0
+        @test details.samples[1].zeta == ["1"]
+        @test length(response["sig"]) == 5
+        @test all(isfinite, response["sig"])
+        @test ncodeunits(response["msg"]) <= 255
+        @test all(byte -> byte <= 0x7f, codeunits(response["msg"]))
 
-        for invalid_coefficient in (true, 1.5, "1")
-            coefficients = Any[fermat...]
-            coefficients[1] = invalid_coefficient
-            response = score_instance(instance(7), coefficients)
-            @test response["status"] == "INVALID"
-            @test occursin("only integers", response["msg"])
+        reordered = server_module._score_details(
+            test_instance(7; k=5),
+            samples[[3, 1, 4, 2, 5]];
+            curve_builder=stubs.curve_builder,
+            zeta_builder=stubs.zeta_builder,
+            polygon_builder=stubs.polygon_builder,
+            reference_polygons=stubs.reference,
+        )
+        @test reordered.response["sig"][5] == response["sig"][5]
+        @test reordered.response["sig"][3:4] == response["sig"][3:4]
+        @test reordered.response["score"] ≈ response["score"]
+
+        linear = server_module._score_details(
+            test_instance(7; k=5, curve_reward="linear"),
+            samples;
+            curve_builder=stubs.curve_builder,
+            zeta_builder=stubs.zeta_builder,
+            polygon_builder=stubs.polygon_builder,
+            reference_polygons=stubs.reference,
+        )
+        @test linear.response["score"] ≈ 2.9
+
+        no_supersingular_reward = server_module._score_details(
+            test_instance(7; k=5, curve_reward="linear", ss_codim=0),
+            samples;
+            curve_builder=stubs.curve_builder,
+            zeta_builder=stubs.zeta_builder,
+            polygon_builder=stubs.polygon_builder,
+            reference_polygons=stubs.reference,
+        )
+        @test no_supersingular_reward.samples[3].reward == 0.0
+        @test no_supersingular_reward.response["score"] ≈ 2.7
+    end
+
+    @testset "Invalid and failed samples" begin
+        valid = tagged_coefficients(1)
+        invalid = zeros(Int, 21)
+        partly_invalid = server_module._score_details(
+            test_instance(7; k=2, lambda=0, beta=0),
+            [valid, invalid];
+            curve_builder=stubs.curve_builder,
+            zeta_builder=stubs.zeta_builder,
+            polygon_builder=stubs.polygon_builder,
+            reference_polygons=stubs.reference,
+        )
+        @test partly_invalid.response["status"] == "OK"
+        @test partly_invalid.response["score"] ≈ log2(3) / 2
+        @test partly_invalid.samples[2].status == "INVALID"
+        @test endswith(partly_invalid.response["msg"], "i")
+
+        all_invalid = server_module._score_details(
+            test_instance(7; k=2),
+            [invalid, invalid];
+            curve_builder=stubs.curve_builder,
+            zeta_builder=stubs.zeta_builder,
+            polygon_builder=stubs.polygon_builder,
+            reference_polygons=stubs.reference,
+        )
+        @test all_invalid.response["status"] == "INVALID"
+        @test all_invalid.response["score"] == 0.0
+        @test all(isfinite, all_invalid.response["sig"])
+
+        failing_zeta = (curve; kwargs...) -> curve == 5 ? error("injected zeta failure") : [curve]
+        evaluation_error = server_module._score_details(
+            test_instance(7; k=2),
+            [valid, tagged_coefficients(5)];
+            curve_builder=stubs.curve_builder,
+            zeta_builder=failing_zeta,
+            polygon_builder=stubs.polygon_builder,
+            reference_polygons=stubs.reference,
+        )
+        @test evaluation_error.response["status"] == "ERROR"
+        @test evaluation_error.samples[2].status == "ERROR"
+        @test occursin("injected zeta failure", evaluation_error.samples[2].reason)
+        @test occursin("e", evaluation_error.response["msg"])
+
+        oversized_message = server_module._score_details(
+            test_instance(7; k=64),
+            fill(tagged_coefficients(2), 64);
+            curve_builder=stubs.curve_builder,
+            zeta_builder=stubs.zeta_builder,
+            polygon_builder=stubs.polygon_builder,
+            reference_polygons=stubs.reference,
+        ).response["msg"]
+        @test ncodeunits(oversized_message) <= 255
+        @test occursin(r"\+\d+ more$", oversized_message)
+    end
+
+    @testset "Per-sample retention records" begin
+        mktempdir() do directory
+            curves_path = joinpath(directory, "curves.jsonl")
+            request = Dict{String,Any}(
+                "program_id" => "test-program",
+                "instance" => test_instance(7; k=2, lambda=0, beta=0),
+                "samples" => [tagged_coefficients(1), tagged_coefficients(1)],
+            )
+            response = server_module._request_response(
+                request,
+                curves_path;
+                curve_builder=stubs.curve_builder,
+                zeta_builder=stubs.zeta_builder,
+                polygon_builder=stubs.polygon_builder,
+                reference_polygons=stubs.reference,
+            )
+            records = JSON.parse.(readlines(curves_path))
+            @test response["status"] == "OK"
+            @test length(records) == 2
+            @test [record["k"] for record in records] == [0, 1]
+            @test records[1]["program_id"] == "test-program"
+            @test records[1]["zeta"] == ["1"]
+            @test records[1]["zeta_key"] == records[2]["zeta_key"]
+            @test records[1]["duplicate_of"] === nothing
+            @test records[2]["duplicate_of"] == 0
+            @test records[2]["sample_reward"] == 0.0
+            @test records[1]["program_score"] == records[2]["program_score"]
+            @test records[1]["batch_id"] == records[2]["batch_id"]
+            @test !isempty(records[1]["batch_id"])
         end
     end
 
-    @testset "Measurement sample handling" begin
+    @testset "PGL3 transforms preserve zeta classes at p=7, 11, 13" begin
+        for p in (7, 11, 13)
+            rng = MersenneTwister(0x50474c33 + p)
+            base = random_nonordinary_curve(p, rng)
+            transformed = [
+                transform_curve(base, random_invertible_matrix(rng, p), p)
+                for _ in 1:3
+            ]
+            details = server_module._score_details(test_instance(p; k=4), [base, transformed...])
+            @test details.response["status"] == "OK"
+            @test all(sample.status == "OK" for sample in details.samples)
+            @test all(sample.codim > 0 for sample in details.samples)
+            @test length(unique(sample.zeta_key for sample in details.samples)) == 1
+            @test details.response["sig"][3] == 1 / 4
+        end
+    end
+
+    @testset "Measurement sample classification" begin
         elapsed = Float64[]
-        @test FunSearchNewtonConsistentMeasureServer._record_measurement_sample!(elapsed, Dict("status" => "OK"), 0.25)
+        @test FunSearchNewtonConsistentMeasureServer._record_measurement_sample!(
+            elapsed,
+            Dict("status" => "OK"),
+            0.25,
+        )
         @test elapsed == [0.25]
-        @test !FunSearchNewtonConsistentMeasureServer._record_measurement_sample!(elapsed, Dict("status" => "INVALID"), 0.5)
+        @test !FunSearchNewtonConsistentMeasureServer._record_measurement_sample!(
+            elapsed,
+            Dict("status" => "INVALID"),
+            0.5,
+        )
         @test elapsed == [0.25]
         @test_throws ErrorException FunSearchNewtonConsistentMeasureServer._record_measurement_sample!(
-            elapsed, Dict("status" => "ERROR", "msg" => "injected evaluation failure"), 0.75,
+            elapsed,
+            Dict("status" => "ERROR", "msg" => "stub failed"),
+            1.0,
         )
-        @test_throws ErrorException FunSearchNewtonConsistentMeasureServer._record_measurement_sample!(elapsed, Dict("status" => "UNKNOWN"), 1.0)
-        @test elapsed == [0.25]
     end
 
-    @testset "Unexpected curve-construction failures" begin
-        details = server_module._score_details(
-            instance(7),
-            fermat;
-            curve_builder=(p, coefficients) -> error("injected curve-construction failure"),
-        )
-        @test details.response["status"] == "ERROR"
-        @test occursin("could not construct curve", details.response["msg"])
-        @test occursin("injected curve-construction failure", details.response["msg"])
-    end
-
-    @testset "DeRham failures are classified by curve smoothness" begin
-        failing_polygon = (curve; kwargs...) -> throw(UndefVarError(:verbose))
-        smooth_failure = server_module._score_details(
-            instance(7), fermat; polygon_builder=failing_polygon,
-        )
-        @test smooth_failure.response["status"] == "ERROR"
-        @test occursin("DeRham evaluation failed", smooth_failure.response["msg"])
-
-        singular_coefficients = zeros(Int, 21)
-        singular_coefficients[21] = 1
-        singular_failure = server_module._score_details(
-            instance(7), singular_coefficients; polygon_builder=failing_polygon,
-        )
-        @test singular_failure.response["status"] == "INVALID"
-        @test singular_failure.response["msg"] == "curve is singular"
-    end
-
-    @testset "Known smooth and singular curves" begin
-        supersingular = score_instance(instance(7), fermat)
-        @test supersingular["status"] == "OK"
-        @test supersingular["score"] == 0.0
-        @test supersingular["msg"] == "supersingular (excluded)"
-        @test supersingular["sig"][1:6] == [0.5, 1.0, 1.5, 2.0, 2.5, 3.0]
-        @test supersingular["sig"][7] == server_module._curve_id(server_module._canonical_coefficients(7, fermat))
-
-        ordinary = score_instance(instance(11), fermat)
-        @test ordinary["status"] == "OK"
-        @test ordinary["score"] == 0.0
-        @test ordinary["msg"] == ""
-        @test ordinary["sig"] == zeros(6)
-
-        singular_coefficients = zeros(Int, 21)
-        singular_coefficients[21] = 1
-        singular = score_instance(instance(7), singular_coefficients)
-        @test singular["status"] == "INVALID"
-        @test singular["msg"] == "curve is singular"
-    end
-
-    @testset "Reward modes" begin
-        mixed = server_module.InstanceConfig(7, "mixed", 0.5, 0.01, true)
-        depth = server_module.InstanceConfig(7, "depth", 0.5, 0.01, true)
-        novelty = server_module.InstanceConfig(7, "novelty", 0.5, 0.01, true)
-        @test server_module._reward_score(5, true, mixed) == 5.5
-        @test server_module._reward_score(5, true, depth) == 5.0
-        @test server_module._reward_score(5, true, novelty) == 1.05
-        @test server_module._reward_score(12, true, mixed; supersingular_excluded=true) == 0.0
-
-        logmixed = server_module._parse_instance("family=plane,d=5,p=7")
-        @test logmixed.reward == "logmixed"
-        @test server_module._reward_score(0, false, logmixed) == 0.0
-        @test server_module._reward_score(3, false, logmixed) == 2.0
-        @test server_module._reward_score(7, true, logmixed) == 3.5
-        @test server_module._reward_score(12, true, logmixed; supersingular_excluded=true) == 0.0
-    end
-
-    @testset "Known polygons extend the reference" begin
-        codim8_key = "0;1/4;1/2;3/4;1;3/2;2;5/2;3;15/4;9/2;21/4;6"
-        @test !(codim8_key in server_module._load_reference_table(server_module.REFERENCE_PATH)[7])
-        @test codim8_key in server_module._load_reference_table(server_module.KNOWN_POLYGONS_PATH)[7]
-        @test codim8_key in server_module.REFERENCE_POLYGONS[7]
-        @test issubset(server_module._load_reference_table(server_module.REFERENCE_PATH)[11],
-                       server_module.REFERENCE_POLYGONS[11])
-
-        best = zeros(Int, 21)
-        best[[1, 6, 21]] .= 1
-        best[15] = 2
-        details = server_module._score_details("family=plane,d=5,p=7", best)
-        @test details.response["status"] == "OK"
-        @test details.codim == 8
-        @test details.novel == false
-        @test details.response["score"] == log2(9)
-        @test details.response["sig"][1:6] == [0.25, 0.5, 0.75, 1.0, 1.5, 2.0]
-        @test length(details.response["sig"]) == 7
-    end
-
-    @testset "Curve-aware signatures" begin
-        p = 7
-        exponents = server_module.MONOMIAL_EXPONENTS
-        coefficient(vector, exponent) = vector[findfirst(==(exponent), exponents)]
-        curve = zeros(Int, 21)
-        curve[[1, 6, 21]] .= 1
-        curve[15] = 2
-        @test coefficient(curve, (2, 3, 0)) == 2
-        canonical = server_module._canonical_coefficients(p, curve)
-        @test canonical <= curve
-        @test findfirst(!iszero, canonical) !== nothing && canonical[findfirst(!iszero, canonical)] == 1
-
-        orders = ((1, 2, 3), (1, 3, 2), (2, 1, 3), (2, 3, 1), (3, 1, 2), (3, 2, 1))
-        transformed_curves = [[mod(4 * coefficient(curve, (exponent[order[1]], exponent[order[2]], exponent[order[3]])) *
-                                   powermod(2, exponent[2], p) * powermod(3, exponent[3], p), p)
-                               for exponent in exponents] for order in orders]
-        @test all(transformed -> transformed != curve, transformed_curves)
-        @test all(server_module._canonical_coefficients(p, transformed) == canonical
-                  for transformed in transformed_curves)
-
-        other = copy(curve)
-        other[15] = 0
-        other[14] = 2
-        @test server_module._canonical_coefficients(p, other) != canonical
-
-        id = server_module._curve_id(canonical)
-        @test isinteger(id) && 0 <= id < 2.0^52
-        @test id == server_module._curve_id(copy(canonical))
-
-        response = score_instance("family=plane,d=5,p=7", curve)
-        transformed = transformed_curves[2]
-        same = score_instance("family=plane,d=5,p=7", transformed)
-        @test response["status"] == same["status"] == "OK"
-        @test response["sig"] == same["sig"]
-        @test response["score"] == same["score"]
-        @test length(response["sig"]) <= 8
-        @test response["sig"][7] == id
-
-        inequivalent = copy(curve)
-        inequivalent[15] = 3
-        @test server_module._canonical_coefficients(p, inequivalent) != canonical
-        distinct = score_instance("family=plane,d=5,p=7", inequivalent)
-        @test distinct["status"] == "OK"
-        @test distinct["score"] == response["score"]
-        @test distinct["sig"][1:6] == response["sig"][1:6]
-        @test length(distinct["sig"]) == 7
-        @test distinct["sig"][7] != response["sig"][7]
-
-        seed_curve = [4, 5, 3, 1, 4, 6, 4, 2, 1, 6, 4, 6, 5, 1, 1, 1, 1, 1, 3, 1, 4]
-        ordinary_details = server_module._score_details("family=plane,d=5,p=7", seed_curve)
-        ordinary = ordinary_details.response
-        @test ordinary["status"] == "OK"
-        @test ordinary["sig"] == zeros(6)
-        @test ordinary_details.canonical === nothing
-        ordinary_row = JSON.parse(JSON.json(server_module._retention_record(ordinary_details, Dict{String,Any}(), 0.0)))
-        @test haskey(ordinary_row, "canonical_coeffs")
-        @test ordinary_row["canonical_coeffs"] === nothing
-    end
-
-    @testset "Bounded request lines" begin
-        @test server_module._read_request_line(IOBuffer("{}\n")) == "{}"
-        @test server_module._read_request_line(IOBuffer("x"^(server_module.MAX_REQUEST_BYTES + 1))) == :too_large
-    end
-
-    @testset "Ready-file publication does not follow symlinks" begin
-        mktempdir() do directory
-            target_path = joinpath(directory, "target.json")
-            ready_path = joinpath(directory, "ready.json")
-            write(target_path, "preserve this target")
-            symlink(target_path, ready_path)
-
-            server_module._write_ready_file(ready_path, Dict("status" => "ready"))
-
-            @test read(target_path, String) == "preserve this target"
-            @test !islink(ready_path)
-            @test JSON.parse(read(ready_path, String))["status"] == "ready"
-        end
-    end
-
-    @testset "Socket is private at bind time" begin
-        mktempdir() do directory
-            socket_path = joinpath(directory, "score.sock")
-            original_umask = ccall(:umask, Cint, (Cint,), Cint(0o022))
-            listener = nothing
-            try
-                listener = server_module._listen_private_socket(socket_path)
-                @test (stat(socket_path).mode & 0o777) == 0o600
-            finally
-                ccall(:umask, Cint, (Cint,), original_umask)
-                listener !== nothing && close(listener)
-                rm(socket_path; force=true)
-            end
-        end
-    end
-
-    @testset "Unix socket round trip and append-only retention" begin
-        mktempdir() do directory
-            socket_path = joinpath(directory, "score.sock")
-            ready_path = joinpath(directory, "ready.json")
-            curves_path = joinpath(directory, "curves.jsonl")
-            write(curves_path, "existing-run-line\n")
-            server = server_module.start_server(socket_path, ready_path, curves_path)
-            try
-                @test isfile(ready_path)
-                ready = JSON.parse(read(ready_path, String))
-                @test ready["status"] == "ready"
-                @test ready["precision_provenance"]["path"] == "table"
-                @test ready["precision_provenance"]["N_m"] == [4, 4]
-                derham_root = dirname(dirname(pathof(DeRham)))
-                loaded_derham_commit = strip(read(`git -C $derham_root rev-parse HEAD`, String))
-                @test ready["DeRham_commit"] == loaded_derham_commit
-                @test (stat(socket_path).mode & 0o777) == 0o600
-
-                connection = Sockets.connect(socket_path)
-                request = Dict(
-                    "program_id" => "unit-test-program",
-                    "instance" => instance(7),
-                    "coeffs" => zeros(Int, 21),
-                )
-                write(connection, JSON.json(request))
-                write(connection, '\n')
-                flush(connection)
-                response = JSON.parse(readline(connection))
-                close(connection)
-
-                @test response["status"] == "INVALID"
-
-                positive_connection = Sockets.connect(socket_path)
-                positive_request = Dict(
-                    "program_id" => "positive-score-program",
-                    "instance" => instance(7; exclude_ss=false),
-                    "coeffs" => fermat,
-                )
-                write(positive_connection, JSON.json(positive_request))
-                write(positive_connection, '\n')
-                flush(positive_connection)
-                positive_response = JSON.parse(readline(positive_connection))
-                close(positive_connection)
-
-                @test positive_response["status"] == "OK"
-                @test positive_response["score"] > 0.0
-                @test positive_response["sig"][1:6] == [0.5, 1.0, 1.5, 2.0, 2.5, 3.0]
-                rows = readlines(curves_path)
-                @test rows[1] == "existing-run-line"
-                @test length(rows) == 3
-                record = JSON.parse(rows[2])
-                @test record["program_id"] == "unit-test-program"
-                @test record["p"] == 7
-                @test record["status"] == "INVALID"
-                @test record["slopes"] === nothing
-                @test record["reward"] == 0.0
-                @test record["wall_time_seconds"] >= 0.0
-                @test endswith(record["timestamp"], "Z")
-                positive_record = JSON.parse(rows[3])
-                @test positive_record["program_id"] == "positive-score-program"
-                @test positive_record["status"] == "OK"
-                @test positive_record["codim"] > 0
-                @test positive_record["reward"] > 0.0
-                @test positive_record["canonical_coeffs"] == server_module._canonical_coefficients(7, fermat)
-            finally
-                server_module.stop_server(server)
-            end
-            @test !ispath(socket_path)
-            @test !ispath(ready_path)
-        end
-    end
-
-    @testset "Multiple requests on one socket connection" begin
-        mktempdir() do directory
-            socket_path = joinpath(directory, "score.sock")
-            ready_path = joinpath(directory, "ready.json")
-            curves_path = joinpath(directory, "curves.jsonl")
-            server = server_module.start_server(socket_path, ready_path, curves_path)
-            connection = Sockets.connect(socket_path)
-            requests = [
-                Dict("program_id" => "persistent-1", "instance" => instance(7; exclude_ss=false), "coeffs" => fermat),
-                Dict("program_id" => "persistent-2", "instance" => instance(11; exclude_ss=false), "coeffs" => fermat),
-            ]
-            try
-                for request in requests
-                    write(connection, JSON.json(request))
-                    write(connection, '\n')
-                end
-                flush(connection)
-                responses = [JSON.parse(readline(connection)) for _ in requests]
-                @test [response["status"] for response in responses] == ["OK", "OK"]
-            finally
-                close(connection)
-                server_module.stop_server(server)
-            end
-
-            rows = JSON.parse.(readlines(curves_path))
-            @test [row["program_id"] for row in rows] == ["persistent-1", "persistent-2"]
-            @test [row["status"] for row in rows] == ["OK", "OK"]
-        end
-    end
-
-    @testset "Retention failures are returned to the client" begin
-        mktempdir() do directory
-            parent_file = joinpath(directory, "not-a-directory")
-            write(parent_file, "occupied")
-            curves_path = joinpath(parent_file, "curves.jsonl")
-            request = Dict(
-                "instance" => instance(7),
-                "coeffs" => zeros(Int, 21),
-            )
-
-            response = server_module._request_response(request, curves_path)
-
-            @test response["status"] == "ERROR"
-            @test occursin("curve retention failed", response["msg"])
-        end
-    end
-
-    @testset "Socket protocol errors are not retained" begin
-        mktempdir() do directory
-            socket_path = joinpath(directory, "score.sock")
-            ready_path = joinpath(directory, "ready.json")
-            curves_path = joinpath(directory, "curves.jsonl")
-            server = server_module.start_server(socket_path, ready_path, curves_path)
-            try
-                malformed = request_line(socket_path, "not-json")
-                @test malformed["status"] == "ERROR"
-                @test occursin("malformed JSON", malformed["msg"])
-
-                non_object = request_line(socket_path, "[]")
-                @test non_object["status"] == "ERROR"
-                @test occursin("JSON object", non_object["msg"])
-
-                oversized = request_line(socket_path, "x"^(server_module.MAX_REQUEST_BYTES + 1))
-                @test oversized["status"] == "ERROR"
-                @test occursin("exceeds", oversized["msg"])
-            finally
-                server_module.stop_server(server)
-            end
-            @test !isfile(curves_path)
-        end
-    end
-
-    @testset "Concurrent clients receive and retain their own requests" begin
-        mktempdir() do directory
-            socket_path = joinpath(directory, "score.sock")
-            ready_path = joinpath(directory, "ready.json")
-            curves_path = joinpath(directory, "curves.jsonl")
-            server = server_module.start_server(socket_path, ready_path, curves_path)
-            requests = [
-                Dict("program_id" => "concurrent-$i", "instance" => instance(7; exclude_ss=false),
-                     "coeffs" => isodd(i) ? zeros(Int, 21) : fermat)
-                for i in 1:4
-            ]
-            expected = ["INVALID", "OK", "INVALID", "OK"]
-            connections = [Sockets.connect(socket_path) for _ in requests]
-            try
-                for (connection, request) in zip(connections, requests)
-                    write(connection, JSON.json(request))
-                    write(connection, '\n')
-                    flush(connection)
-                end
-                responses = [JSON.parse(readline(connection)) for connection in connections]
-                @test [response["status"] for response in responses] == expected
-            finally
-                foreach(close, connections)
-                server_module.stop_server(server)
-            end
-
-            rows = JSON.parse.(readlines(curves_path))
-            @test length(rows) == length(requests)
-            retained = Dict(row["program_id"] => row["status"] for row in rows)
-            @test retained == Dict(request["program_id"] => expected[i] for (i, request) in enumerate(requests))
-        end
-    end
-
-    @testset "Excess client connections are closed" begin
-        mktempdir() do directory
-            socket_path = joinpath(directory, "score.sock")
-            ready_path = joinpath(directory, "ready.json")
-            curves_path = joinpath(directory, "curves.jsonl")
-            server = server_module.start_server(socket_path, ready_path, curves_path)
-            connections = Sockets.connect.(fill(socket_path, server_module.MAX_ACTIVE_CLIENTS))
-            excess = nothing
-            excess_read = nothing
-            try
-                deadline = time() + 5
-                while true
-                    active_clients = lock(server.clients_lock) do
-                        length(server.client_connections)
-                    end
-                    active_clients == server_module.MAX_ACTIVE_CLIENTS && break
-                    time() < deadline || error("server did not accept the configured client limit")
-                    yield()
-                end
-
-                excess = Sockets.connect(socket_path)
-                excess_read = @async try
-                    read(excess, UInt8)
-                catch error
-                    error
-                end
-                @test timedwait(() -> istaskdone(excess_read), 5; pollint=0.01) == :ok
-                @test fetch(excess_read) isa EOFError
-            finally
-                foreach(close, connections)
-                excess !== nothing && close(excess)
-                server_module.stop_server(server)
-            end
-        end
-    end
-
-    @testset "Stopping the server releases an idle client" begin
+    @testset "Socket batch round trip and cleanup" begin
         mktempdir() do directory
             socket_path = joinpath(directory, "score.sock")
             ready_path = joinpath(directory, "ready.json")
             curves_path = joinpath(directory, "curves.jsonl")
             server = server_module.start_server(socket_path, ready_path, curves_path)
             connection = nothing
-            reader = nothing
-            stop_task = nothing
             try
+                @test isfile(ready_path)
+                ready = JSON.parse(read(ready_path, String))
+                @test ready["status"] == "ready"
+                @test ready["julia_version"] == string(VERSION)
+                @test occursin("funsearch-newton/reference", join(ready["reference_tables"], " "))
                 connection = Sockets.connect(socket_path)
-                deadline = time() + 5
-                while true
-                    active_clients = lock(server.clients_lock) do
-                        length(server.client_connections)
-                    end
-                    active_clients == 1 && break
-                    time() < deadline || error("server did not accept the idle client")
-                    yield()
-                end
-
-                reader = @async try
-                    read(connection, UInt8)
-                catch error
-                    error
-                end
-                stop_task = @async server_module.stop_server(server)
-                stop_status = timedwait(() -> istaskdone(stop_task), 5; pollint=0.01)
-                @test stop_status == :ok
-                if stop_status == :ok
-                    fetch(stop_task)
-                end
-
-                reader_status = timedwait(() -> istaskdone(reader), 5; pollint=0.01)
-                @test reader_status == :ok
-                if reader_status == :ok
-                    @test fetch(reader) isa EOFError
-                end
-                @test !ispath(socket_path)
-                @test !ispath(ready_path)
+                request = Dict{String,Any}(
+                    "program_id" => "socket-program",
+                    "instance" => test_instance(7; k=2, lambda=0, beta=0),
+                    "samples" => [server_module.FERMAT_COEFFICIENTS, server_module.FERMAT_COEFFICIENTS],
+                )
+                write(connection, JSON.json(request))
+                write(connection, '\n')
+                flush(connection)
+                response = JSON.parse(readline(connection))
+                @test response["status"] == "OK"
+                @test length(response["sig"]) == 5
+                @test ncodeunits(response["msg"]) <= 255
+                records = JSON.parse.(readlines(curves_path))
+                @test length(records) == 2
+                @test records[1]["batch_id"] == records[2]["batch_id"]
+                @test records[2]["duplicate_of"] == 0
             finally
                 connection !== nothing && close(connection)
-                if stop_task === nothing
-                    server_module.stop_server(server)
-                end
-            end
-        end
-    end
-
-    @testset "Startup failure cleans bound resources" begin
-        mktempdir() do directory
-            socket_path = joinpath(directory, "score.sock")
-            ready_path = joinpath(directory, "ready.json")
-            curves_path = joinpath(directory, "curves.jsonl")
-            server = nothing
-            startup_error = nothing
-            try
-                server = server_module._start_server(
-                    socket_path,
-                    ready_path,
-                    curves_path,
-                    (path, record) -> error("injected ready-file failure"),
-                )
-            catch caught
-                startup_error = caught
-            end
-            server !== nothing && server_module.stop_server(server)
-
-            @test startup_error isa ErrorException
-            if startup_error !== nothing
-                @test occursin("injected ready-file failure", sprint(showerror, startup_error))
+                server_module.stop_server(server)
             end
             @test !ispath(socket_path)
             @test !ispath(ready_path)
         end
+    end
+
+    @testset "Request-line limits and startup arguments" begin
+        @test server_module._read_request_line(IOBuffer("{}\n")) == "{}"
+        @test server_module._read_request_line(IOBuffer("x"^(server_module.MAX_REQUEST_BYTES + 1))) == :too_large
+        @test server_module._server_arguments([
+            "--socket", "score.sock",
+            "--ready-file", "ready.json",
+            "--curves", "curves.jsonl",
+        ]) == Dict("socket" => "score.sock", "ready-file" => "ready.json", "curves" => "curves.jsonl")
+        @test_throws ArgumentError server_module._server_arguments(["--socket", "score.sock"])
     end
 end

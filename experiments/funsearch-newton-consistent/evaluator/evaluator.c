@@ -17,10 +17,11 @@
 #include <pthread.h>
 
 #define MAX_INSTANCE_BYTES 4096
-#define REQUEST_BYTES 8192
+#define REQUEST_BYTES 65536
 #define RESPONSE_BYTES 16384
+#define MAX_SAMPLES 64
 
-typedef void (*curve_fn)(int32_t, int32_t[21]);
+typedef void (*curve_fn)(int32_t, int32_t, int32_t[21]);
 
 static pthread_mutex_t state_lock = PTHREAD_MUTEX_INITIALIZER;
 static int server_fd = -1;
@@ -103,7 +104,8 @@ static int connect_server_locked(char *message, size_t message_size)
     return 0;
 }
 
-static int parse_prime(const char *instance, int32_t *prime)
+
+static int parse_instance(const char *instance, int32_t *prime, int32_t *sample_count)
 {
     if (instance == NULL)
         return -1;
@@ -111,7 +113,9 @@ static int parse_prime(const char *instance, int32_t *prime)
     if (length == 0 || length > MAX_INSTANCE_BYTES)
         return -1;
 
-    int found = 0;
+    int found_prime = 0;
+    int found_sample_count = 0;
+    *sample_count = 16;
     const char *cursor = instance;
     const char *end = instance + length;
     while (cursor < end) {
@@ -126,10 +130,13 @@ static int parse_prime(const char *instance, int32_t *prime)
                 ++key_start;
             while (key_end > key_start && isspace((unsigned char)key_end[-1]))
                 --key_end;
-            if (key_end - key_start == 1 && key_start[0] == 'p') {
-                if (found)
+            int is_prime = key_end - key_start == 1 && key_start[0] == 'p';
+            int is_sample_count = key_end - key_start == 1 && key_start[0] == 'k';
+            if (is_prime || is_sample_count) {
+                if ((is_prime && found_prime) || (is_sample_count && found_sample_count))
                     return -1;
-                found = 1;
+                found_prime |= is_prime;
+                found_sample_count |= is_sample_count;
                 const char *value_start = equals + 1;
                 while (value_start < token_end && isspace((unsigned char)*value_start))
                     ++value_start;
@@ -145,15 +152,22 @@ static int parse_prime(const char *instance, int32_t *prime)
                 errno = 0;
                 char *parse_end = NULL;
                 long parsed = strtol(value, &parse_end, 10);
-                if (errno != 0 || parse_end == value || *parse_end != '\0' ||
-                    parsed < 2 || parsed > INT32_MAX)
+                if (errno != 0 || parse_end == value || *parse_end != '\0')
                     return -1;
-                *prime = (int32_t)parsed;
+                if (is_prime) {
+                    if (parsed < 2 || parsed > INT32_MAX)
+                        return -1;
+                    *prime = (int32_t)parsed;
+                } else {
+                    if (parsed < 1 || parsed > MAX_SAMPLES)
+                        return -1;
+                    *sample_count = (int32_t)parsed;
+                }
             }
         }
         cursor = token_end + (token_end < end);
     }
-    return found ? 0 : -1;
+    return found_prime ? 0 : -1;
 }
 
 static int append_bytes(char *output, size_t capacity, size_t *used, const char *bytes, size_t count)
@@ -193,19 +207,28 @@ static int append_json_string(char *output, size_t capacity, size_t *used, const
     return append_bytes(output, capacity, used, "\"", 1);
 }
 
-static int build_request(const char *instance, const int32_t coefficients[21],
-                         char *output, size_t capacity, size_t *length)
+
+static int build_request(const char *instance, const int32_t samples[MAX_SAMPLES][21],
+                         int32_t sample_count, char *output, size_t capacity, size_t *length)
 {
     size_t used = 0;
-    if (append_bytes(output, capacity, &used, "{\"instance\":", 12) != 0 ||
+    if (append_bytes(output, capacity, &used, "{\"instance\":", sizeof("{\"instance\":") - 1) != 0 ||
         append_json_string(output, capacity, &used, instance) != 0 ||
-        append_bytes(output, capacity, &used, ",\"coeffs\":[", 11) != 0)
+        append_bytes(output, capacity, &used, ",\"samples\":[", sizeof(",\"samples\":[") - 1) != 0)
         return -1;
-    for (int i = 0; i < 21; ++i) {
-        char number[32];
-        int written = snprintf(number, sizeof(number), "%s%d", i == 0 ? "" : ",", coefficients[i]);
-        if (written < 0 || (size_t)written >= sizeof(number) ||
-            append_bytes(output, capacity, &used, number, (size_t)written) != 0)
+    for (int32_t sample = 0; sample < sample_count; ++sample) {
+        if ((sample != 0 && append_bytes(output, capacity, &used, ",", 1) != 0) ||
+            append_bytes(output, capacity, &used, "[", 1) != 0)
+            return -1;
+        for (int i = 0; i < 21; ++i) {
+            char number[32];
+            int written = snprintf(number, sizeof(number), "%s%d", i == 0 ? "" : ",",
+                                   samples[sample][i]);
+            if (written < 0 || (size_t)written >= sizeof(number) ||
+                append_bytes(output, capacity, &used, number, (size_t)written) != 0)
+                return -1;
+        }
+        if (append_bytes(output, capacity, &used, "]", 1) != 0)
             return -1;
     }
     if (append_bytes(output, capacity, &used, "]}\n", 3) != 0)
@@ -556,12 +579,14 @@ void fs_fini(void)
     pthread_mutex_unlock(&state_lock);
 }
 
+
 fs_result fs_score(fs_resolve_fn resolve, const char *instance)
 {
     fs_result result = make_result(FS_ERROR, "evaluator failed");
     int32_t prime = 0;
-    if (parse_prime(instance, &prime) != 0)
-        return make_result(FS_INVALID, "instance must contain one prime p");
+    int32_t sample_count = 16;
+    if (parse_instance(instance, &prime, &sample_count) != 0)
+        return make_result(FS_INVALID, "instance must contain one prime p and k from 1 through 64");
     if (resolve == NULL)
         return make_result(FS_ERROR, "candidate resolver is missing");
 
@@ -569,21 +594,16 @@ fs_result fs_score(fs_resolve_fn resolve, const char *instance)
     if (symbol == NULL)
         return make_result(FS_ERROR, "candidate does not export curve");
     curve_fn candidate = (curve_fn)symbol;
-    int32_t coefficients[21] = {0};
-    candidate(prime, coefficients);
-    int nonzero = 0;
-    for (int i = 0; i < 21; ++i) {
-        if (coefficients[i] < 0 || coefficients[i] >= prime)
-            return make_result(FS_INVALID, "coefficients must lie in 0:p-1");
-        nonzero |= coefficients[i] != 0;
+    int32_t samples[MAX_SAMPLES][21];
+    for (int32_t k = 0; k < sample_count; ++k) {
+        memset(samples[k], 0, sizeof(samples[k]));
+        candidate(prime, k, samples[k]);
     }
-    if (!nonzero)
-        return make_result(FS_INVALID, "the zero polynomial is invalid");
 
     char request[REQUEST_BYTES];
     size_t request_length = 0;
-    if (build_request(instance, coefficients, request, sizeof(request), &request_length) != 0)
-        return make_result(FS_INVALID, "instance is too large to send");
+    if (build_request(instance, samples, sample_count, request, sizeof(request), &request_length) != 0)
+        return make_result(FS_INVALID, "batch request is too large to send");
     char response[RESPONSE_BYTES];
     char message[256] = {0};
 

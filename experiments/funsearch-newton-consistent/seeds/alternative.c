@@ -1,11 +1,14 @@
 #include "candidate.h"
 
-void curve(int32_t p, int32_t coeffs[21])
+void curve(int32_t p, int32_t k, int32_t coeffs[21])
 {
-    static const int32_t values[21] = {
-        4, 1, 5, 2, 6, 3, 0, 2, 5, 1, 4,
-        6, 3, 0, 5, 2, 4, 1, 6, 3, 5
-    };
-    for (int i = 0; i < 21; ++i)
-        coeffs[i] = values[i] % p;
+    uint32_t state = UINT32_C(0xabcde123) ^ ((uint32_t)k * UINT32_C(0x85ebca6b));
+    int nonzero = 0;
+    for (int i = 0; i < 21; ++i) {
+        state = state * UINT32_C(1103515245) + UINT32_C(12345);
+        coeffs[i] = (int32_t)((state >> 16) % (uint32_t)p);
+        nonzero |= coeffs[i] != 0;
+    }
+    if (!nonzero)
+        coeffs[0] = 1;
 }

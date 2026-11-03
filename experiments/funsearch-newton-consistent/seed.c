@@ -1,8 +1,8 @@
 #include "candidate.h"
 
-void curve(int32_t p, int32_t coeffs[21])
+void curve(int32_t p, int32_t k, int32_t coeffs[21])
 {
-    uint32_t state = UINT32_C(0x5eed1234);
+    uint32_t state = UINT32_C(0x5eed1234) ^ ((uint32_t)k * UINT32_C(0x9e3779b9));
     int nonzero = 0;
     for (int i = 0; i < 21; ++i) {
         state = state * UINT32_C(1664525) + UINT32_C(1013904223);

@@ -518,11 +518,11 @@ end
                 for index in 1:2
                     log = open(log_paths[index], "w")
                     push!(server_logs, log)
-                    command = `$(Base.julia_cmd()) --threads=1 --project=$repository $server_script --socket $(socket_paths[index]) --ready-file $(ready_paths[index]) --curves $curves_path`
+                    command = `$(Base.julia_cmd()) --threads=1 --project=$(Base.active_project()) $server_script --socket $(socket_paths[index]) --ready-file $(ready_paths[index]) --curves $curves_path`
                     push!(server_processes, run(pipeline(command, stdout=log, stderr=log); wait=false))
                 end
 
-                deadline = time() + 180
+                deadline = time() + 600
                 while time() < deadline && !all(isfile, ready_paths)
                     any(process -> !process_running(process), server_processes) && break
                     sleep(0.1)

@@ -283,6 +283,23 @@ end
         @test partly_invalid.samples[2].status == "INVALID"
         @test endswith(partly_invalid.response["msg"], "i")
 
+        out_of_field = copy(valid)
+        out_of_field[1] = 7
+        range_checked = server_module._score_details(
+            test_instance(7; k=2, lambda=0, beta=0),
+            [valid, out_of_field];
+            curve_builder=stubs.curve_builder,
+            zeta_builder=stubs.zeta_builder,
+            polygon_builder=stubs.polygon_builder,
+            reference_polygons=stubs.reference,
+        )
+        @test range_checked.response["status"] == "OK"
+        @test range_checked.response["score"] ≈ log2(3) / 2
+        @test range_checked.samples[1].status == "OK"
+        @test range_checked.samples[2].status == "INVALID"
+        @test range_checked.samples[2].reason == "sample coefficients must lie in 0:p-1"
+        @test range_checked.samples[2].reward == 0.0
+
         all_invalid = server_module._score_details(
             test_instance(7; k=2),
             [invalid, invalid];

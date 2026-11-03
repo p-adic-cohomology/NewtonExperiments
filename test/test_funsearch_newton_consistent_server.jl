@@ -234,7 +234,7 @@ end
         @test no_supersingular_reward.response["score"] ≈ 2.7
     end
 
-    @testset "Repeated coefficient vectors reuse successful scoring" begin
+    @testset "Repeated coefficient vectors and equation rescalings reuse successful scoring" begin
         curve_calls = Ref(0)
         zeta_calls = Ref(0)
         polygon_calls = Ref(0)
@@ -242,10 +242,11 @@ end
         zeta_builder = (curve; kwargs...) -> (zeta_calls[] += 1; [curve])
         polygon_builder = (p, zeta) -> (polygon_calls[] += 1; stubs.polygon_builder(p, zeta))
         first_curve = tagged_coefficients(1)
+        rescaled_curve = mod.(2 .* first_curve, 7)
         second_curve = tagged_coefficients(2)
         details = server_module._score_details(
-            test_instance(7; k=4, lambda=0, beta=0),
-            [first_curve, copy(first_curve), second_curve, copy(second_curve)];
+            test_instance(7; k=5, lambda=0, beta=0),
+            [first_curve, rescaled_curve, copy(first_curve), second_curve, copy(second_curve)];
             curve_builder=curve_builder,
             zeta_builder=zeta_builder,
             polygon_builder=polygon_builder,
@@ -254,13 +255,16 @@ end
 
         @test details.response["status"] == "OK"
         @test (curve_calls[], zeta_calls[], polygon_calls[]) == (2, 2, 2)
-        @test [sample.k for sample in details.samples] == collect(0:3)
+        @test [sample.k for sample in details.samples] == collect(0:4)
         @test details.samples[2].duplicate_of == 0
-        @test details.samples[4].duplicate_of == 2
-        @test details.samples[2].coefficients == details.samples[1].coefficients
+        @test details.samples[3].duplicate_of == 0
+        @test details.samples[5].duplicate_of == 3
+        @test details.samples[2].coefficients == rescaled_curve
         @test details.samples[2].coefficients !== details.samples[1].coefficients
+        @test details.samples[3].coefficients == details.samples[1].coefficients
+        @test details.samples[3].coefficients !== details.samples[1].coefficients
         @test details.samples[2].reward == 0.0
-        @test details.samples[4].reward == 0.0
+        @test details.samples[5].reward == 0.0
     end
 
     @testset "Invalid and failed samples" begin
@@ -322,10 +326,12 @@ end
     @testset "Per-sample retention records" begin
         mktempdir() do directory
             curves_path = joinpath(directory, "curves.jsonl")
+            original_coefficients = tagged_coefficients(1)
+            rescaled_coefficients = mod.(2 .* original_coefficients, 7)
             request = Dict{String,Any}(
                 "program_id" => "test-program",
                 "instance" => test_instance(7; k=2, lambda=0, beta=0),
-                "samples" => [tagged_coefficients(1), tagged_coefficients(1)],
+                "samples" => [original_coefficients, rescaled_coefficients],
             )
             response = server_module._request_response(
                 request,
@@ -344,6 +350,7 @@ end
             @test records[1]["zeta_key"] == records[2]["zeta_key"]
             @test records[1]["duplicate_of"] === nothing
             @test records[2]["duplicate_of"] == 0
+            @test records[2]["coeffs"] == rescaled_coefficients
             @test records[2]["sample_reward"] == 0.0
             @test records[1]["program_score"] == records[2]["program_score"]
             @test records[1]["batch_id"] == records[2]["batch_id"]

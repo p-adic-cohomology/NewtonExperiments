@@ -476,16 +476,19 @@ function _coefficient_cache_key(raw_coefficients, p::Int)
         return nothing
     end
     all(value -> 0 <= value < p, coefficients) || return nothing
-    any(!iszero, coefficients) || return nothing
-    Tuple(coefficients)
+    lead = findfirst(!iszero, coefficients)
+    lead === nothing && return nothing
+    normalizer = invmod(coefficients[lead], p)
+    normalized = Int[mod(widemul(value, normalizer), p) for value in coefficients]
+    Tuple(normalized)
 end
 
-function _copy_cached_sample(sample, k::Int)
+function _copy_cached_sample(sample, k::Int; coefficients=sample.coefficients)
     merge(
         sample,
         (
             k=k,
-            coefficients=sample.coefficients === nothing ? nothing : copy(sample.coefficients),
+            coefficients=coefficients === nothing ? nothing : copy(coefficients),
             zeta=sample.zeta === nothing ? nothing : copy(sample.zeta),
             canonical=sample.canonical === nothing ? nothing : copy(sample.canonical),
         ),
@@ -520,7 +523,12 @@ function _score_details(
         raw_coefficients = raw_samples[index]
         cache_key = _coefficient_cache_key(raw_coefficients, config.p)
         if cache_key !== nothing && haskey(sample_cache, cache_key)
-            push!(results, _copy_cached_sample(sample_cache[cache_key], index - 1))
+            preserved_coefficients = Int[value for value in raw_coefficients]
+            push!(results, _copy_cached_sample(
+                sample_cache[cache_key],
+                index - 1;
+                coefficients=preserved_coefficients,
+            ))
             continue
         end
         sample = _score_sample(

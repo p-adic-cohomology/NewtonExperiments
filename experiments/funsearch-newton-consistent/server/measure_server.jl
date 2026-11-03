@@ -42,35 +42,38 @@ function _record_measurement_sample!(elapsed, response, seconds)
     throw(ErrorException("unexpected score response status during measurement: $(repr(status))"))
 end
 
-function _measure(samples)
-    samples >= 20 || throw(ArgumentError("at least 20 smooth curves are required"))
-    Random.seed!(20261024)
+function _percentile(values, fraction)
+    ordered = sort(values)
+    ordered[clamp(ceil(Int, fraction * length(ordered)), 1, length(ordered))]
+end
+
+function _measure(p, batches)
+    p in (7, 11, 13) || throw(ArgumentError("p must be one of 7, 11, or 13"))
+    batches >= 10 || throw(ArgumentError("at least 10 batches are required for p90"))
+    rng = MersenneTwister(20261103 + p)
     warmup_started_ns = time_ns()
+    warmup_instance = "family=plane,d=5,p=$p,k=1,curve_reward=log,lambda=0.25,beta=0.5,ss_codim=1"
     warmup = FunSearchNewtonConsistentServer.score_instance(
-        FunSearchNewtonConsistentServer.WARMUP_INSTANCE,
+        warmup_instance,
         [FunSearchNewtonConsistentServer.FERMAT_COEFFICIENTS],
     )
     warmup_seconds = (time_ns() - warmup_started_ns) / 1.0e9
     warmup["status"] == "OK" || throw(ErrorException("warm-up failed: $(warmup["msg"])"))
 
-    instance = "family=plane,d=5,p=7,k=1,curve_reward=log,beta=0.5,lambda=0.25,ss_codim=1"
+    instance = "family=plane,d=5,p=$p,k=16,curve_reward=log,beta=0.5,lambda=0.25,ss_codim=1"
     elapsed = Float64[]
     attempts = 0
-    last_reported = 0
-    while length(elapsed) < samples && attempts < 500
+    while length(elapsed) < batches && attempts < batches * 10
         _kaimon_cancelled() && throw(InterruptException())
         attempts += 1
-        coefficients = rand(0:6, 21)
+        samples = [rand(rng, 0:(p - 1), 21) for _ in 1:16]
         started_ns = time_ns()
-        response = FunSearchNewtonConsistentServer.score_instance(instance, [coefficients])
+        response = FunSearchNewtonConsistentServer.score_instance(instance, samples)
         seconds = (time_ns() - started_ns) / 1.0e9
         _record_measurement_sample!(elapsed, response, seconds)
-        if length(elapsed) >= last_reported + 5
-            last_reported = length(elapsed)
-            _kaimon_progress("measured $last_reported/$samples smooth p=7 curves")
-        end
+        _kaimon_progress("measured $(length(elapsed))/$batches p=$p K=16 batches with $(Threads.nthreads()) threads")
     end
-    length(elapsed) == samples || throw(ErrorException("only $(length(elapsed)) smooth curves found in $attempts attempts"))
+    length(elapsed) == batches || throw(ErrorException("only $(length(elapsed)) valid batches found in $attempts attempts"))
 
     source_path = pathof(DeRham)
     source_root = dirname(dirname(source_path))
@@ -81,10 +84,16 @@ function _measure(samples)
         "julia_image_file" => unsafe_string(Base.JLOptions().image_file),
         "load_time_seconds" => FunSearchNewtonConsistentServer.LOAD_TIME_SECONDS,
         "warmup_first_call_seconds" => warmup_seconds,
-        "steady_p7_samples" => samples,
-        "steady_p7_attempts" => attempts,
-        "steady_p7_median_seconds" => _median(elapsed),
-        "steady_p7_seconds" => elapsed,
+        "p" => p,
+        "thread_count" => Threads.nthreads(),
+        "batch_k" => 16,
+        "measured_batches" => batches,
+        "attempts" => attempts,
+        "batch_latency_min_seconds" => minimum(elapsed),
+        "batch_latency_median_seconds" => _median(elapsed),
+        "batch_latency_p90_seconds" => _percentile(elapsed, 0.9),
+        "batch_latency_max_seconds" => maximum(elapsed),
+        "batch_latency_seconds" => elapsed,
         "peak_rss_bytes" => Int(Sys.maxrss()),
         "DeRham_path" => source_path,
         "DeRham_commit" => commit,
@@ -93,8 +102,13 @@ function _measure(samples)
 end
 
 function main(args=ARGS)
-    samples = isempty(args) ? 20 : parse(Int, args[1])
-    println(JSON.json(_measure(samples)))
+    p_argument = isempty(args) ? "all" : args[1]
+    batches = length(args) < 2 ? 10 : parse(Int, args[2])
+    if p_argument == "all"
+        println(JSON.json([_measure(p, batches) for p in (7, 11, 13)]))
+    else
+        println(JSON.json(_measure(parse(Int, p_argument), batches)))
+    end
 end
 
 end

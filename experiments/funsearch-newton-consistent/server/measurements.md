@@ -43,3 +43,17 @@ run was started.
 The alternative seed also passed the same p=7 check with status OK and score 0.
 The launcher selected Python 3.11.15 because the system `python3` was 3.9.6
 and could not import `tomllib`.
+
+## K=16 batch latency and process-pool fallback (2026-11-02)
+
+Measured with Julia 1.13.2, sysimage off, on an Apple M3 Max (arm64, macOS 15.1 / Darwin 24.1.0). DeRham was pinned to `59b331b818aaa7f169a33c42e600cbc6de9044f7` from the gate-owned dependency checkout. The server module loaded in 31.24 s; the first p=7 Fermat warm-up took 31.76 s. Each row below is ten valid random K=16 batches, scored serially by one Julia thread. Invalid random curves were skipped and evaluation errors abort the measurement.
+
+| p | Threads | Min (s) | Median (s) | p90 (s) | Max (s) | Peak RSS per server (bytes) |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 7 | 1 | 16.36498 | 22.77556 | 55.75360 | 88.92108 | 2,869,821,440 |
+| 11 | 1 | 30.92209 | 45.82881 | 71.03950 | 99.02143 | 2,869,821,440 |
+| 13 | 1 | 20.93792 | 25.39929 | 29.24932 | 30.05135 | 2,869,821,440 |
+
+A separate p=7 measurement using four Julia threads crashed with SIGSEGV (signal 11) in `libpolys-4.4.1.dylib` while concurrent samples were being scored at `measure_server.jl:116`. No DeRham `use_threads=true` option was used. Since sample-level Julia threading crashed at four threads, an eight-thread run was not attempted. Following the approved child-3 fallback, the launcher starts a default pool of two independent single-threaded servers instead. The C evaluator selects a socket deterministically from the process id; each server scores requests serially, and a file lock protects the shared curve log.
+
+The p=13 p90 is 29.24932 s per K=16 batch. The candidate timeout is set to 90 s, slightly above three times that p90 (87.75 s). The table reports per-process memory; a two-server pool uses two Julia processes.

@@ -199,7 +199,14 @@ int main(void)
     stub_server server;
     pthread_t server_thread;
     assert(start_stub(&server, &server_thread) == 0);
-    assert(setenv("FUNSEARCH_NEWTON_SOCKET", server.path, 1) == 0);
+    char alternate_path[sizeof(server.path)];
+    char socket_list[2 * sizeof(server.path) + 1];
+    snprintf(alternate_path, sizeof(alternate_path), "/tmp/fsn-unused-%ld.sock", (long)getpid());
+    if (((unsigned long)getpid() % 2) == 0)
+        snprintf(socket_list, sizeof(socket_list), "%s:%s", server.path, alternate_path);
+    else
+        snprintf(socket_list, sizeof(socket_list), "%s:%s", alternate_path, server.path);
+    assert(setenv("FUNSEARCH_NEWTON_SOCKET", socket_list, 1) == 0);
     assert(fs_init("family=plane,d=5,p=7,k=3") == 0);
 
     fs_result result = fs_score(resolve_missing, "family=plane,d=5,p=7,k=3");

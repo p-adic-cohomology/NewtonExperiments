@@ -70,6 +70,7 @@ if [[ -z "$PYTHON_BIN" ]]; then
 fi
 JULIA_BIN=${JULIA_BIN:-/Users/jj-agents/.juliaup/bin/julia}
 START_TIMEOUT=${FUNSEARCH_NEWTON_START_TIMEOUT_S:-900}
+SERVER_COUNT=${FUNSEARCH_NEWTON_SERVERS:-2}
 
 if [[ ! -x "$FUNSEARCH_BIN" ]]; then
     printf 'FunSearch CLI is not executable: %s\n' "$FUNSEARCH_BIN" >&2
@@ -86,6 +87,10 @@ if [[ ! -x "$JULIA_BIN" ]]; then
 fi
 if [[ ! "$START_TIMEOUT" =~ ^[0-9]+$ ]] || ((START_TIMEOUT < 1)); then
     printf 'FUNSEARCH_NEWTON_START_TIMEOUT_S must be a positive integer\n' >&2
+    exit 2
+fi
+if [[ ! "$SERVER_COUNT" =~ ^[1-9][0-9]*$ ]] || ((SERVER_COUNT > 16)); then
+    printf 'FUNSEARCH_NEWTON_SERVERS must be an integer from 1 through 16\n' >&2
     exit 2
 fi
 
@@ -115,9 +120,11 @@ fi
 
 RUNTIME_PARENT=${TMPDIR:-/tmp}
 RUNTIME_DIR=$(mktemp -d "${RUNTIME_PARENT%/}/fsn.XXXXXX")
-SOCKET_PATH="$RUNTIME_DIR/score.sock"
 READY_PATH="$RUNTIME_DIR/ready.json"
 SERVER_LOG="$RUNTIME_DIR/server.log"
+SOCKET_PATHS=()
+READY_FILES=()
+SERVER_PIDS=()
 if [[ "$MODE" == check ]]; then
     CURVES_PATH="$RUNTIME_DIR/curves.jsonl"
 else
@@ -125,46 +132,68 @@ else
     SERVER_LOG=$PENDING_LOG
 fi
 
-SERVER_PID=""
 KEEP_SERVER=0
 cleanup_local() {
     if [[ "$KEEP_SERVER" == 1 ]]; then
         return
     fi
-    if [[ -n "$SERVER_PID" ]] && kill -0 "$SERVER_PID" 2>/dev/null; then
-        kill -TERM "$SERVER_PID" 2>/dev/null || true
-        for _ in {1..10}; do
-            kill -0 "$SERVER_PID" 2>/dev/null || break
-            sleep 1
-        done
-        kill -KILL "$SERVER_PID" 2>/dev/null || true
-        wait "$SERVER_PID" 2>/dev/null || true
-    fi
-    rm -f "$SOCKET_PATH" "$READY_PATH"
+    for index in "${!SERVER_PIDS[@]}"; do
+        pid=${SERVER_PIDS[$index]}
+        if kill -0 "$pid" 2>/dev/null; then
+            kill -TERM "$pid" 2>/dev/null || true
+            for _ in {1..10}; do
+                kill -0 "$pid" 2>/dev/null || break
+                sleep 1
+            done
+            kill -KILL "$pid" 2>/dev/null || true
+            wait "$pid" 2>/dev/null || true
+        fi
+        rm -f "${SOCKET_PATHS[$index]}" "${READY_FILES[$index]}"
+    done
+    rm -f "$READY_PATH" "$RUNTIME_DIR/server-pids" "$RUNTIME_DIR/server-sockets" "$CURVES_PATH"
     if [[ "$MODE" == run ]]; then
-        rm -f "$PENDING_CURVES"
+        rm -f "$PENDING_CURVES" "$PENDING_LOG"
     fi
-    rm -f "$SERVER_LOG"
+    [[ "$MODE" == check ]] && rm -f "$SERVER_LOG"
     rmdir "$RUNTIME_DIR" 2>/dev/null || true
 }
 trap cleanup_local EXIT
 trap 'exit 130' INT TERM
 
-nohup "$JULIA_BIN" --project="$REPO_ROOT" "$SCRIPT_DIR/score_server.jl" \
-    --socket "$SOCKET_PATH" --ready-file "$READY_PATH" --curves "$CURVES_PATH" \
-    >"$SERVER_LOG" 2>&1 </dev/null &
-SERVER_PID=$!
+for ((index = 1; index <= SERVER_COUNT; ++index)); do
+    socket_path="$RUNTIME_DIR/score-$index.sock"
+    ready_file="$RUNTIME_DIR/ready-$index.json"
+    SOCKET_PATHS+=("$socket_path")
+    READY_FILES+=("$ready_file")
+    nohup "$JULIA_BIN" --threads=1 --project="$REPO_ROOT" "$SCRIPT_DIR/score_server.jl" \
+        --socket "$socket_path" --ready-file "$ready_file" --curves "$CURVES_PATH" \
+        >>"$SERVER_LOG" 2>&1 </dev/null &
+    SERVER_PIDS+=("$!")
+done
+printf '%s\n' "${SERVER_PIDS[@]}" > "$RUNTIME_DIR/server-pids"
+printf '%s\n' "${SOCKET_PATHS[@]}" > "$RUNTIME_DIR/server-sockets"
 
 DEADLINE=$((SECONDS + START_TIMEOUT))
-while [[ ! -s "$READY_PATH" ]]; do
-    if ! kill -0 "$SERVER_PID" 2>/dev/null; then
-        cat "$SERVER_LOG" >&2
-        printf '%s\n' "Score server exited before writing its ready file" >&2
-        exit 1
+while true; do
+    all_ready=1
+    for index in "${!SERVER_PIDS[@]}"; do
+        if [[ ! -s "${READY_FILES[$index]}" ]]; then
+            all_ready=0
+            if ! kill -0 "${SERVER_PIDS[$index]}" 2>/dev/null; then
+                cat "$SERVER_LOG" >&2
+                printf 'Score server %s exited before writing its ready file\n' "$((index + 1))" >&2
+                exit 1
+            fi
+        fi
+    done
+    if ((all_ready)); then
+        jq -s --argjson count "$SERVER_COUNT" '{status:"ready",server_count:$count,servers:.}' \
+            "${READY_FILES[@]}" > "$READY_PATH"
+        break
     fi
     if ((SECONDS >= DEADLINE)); then
         cat "$SERVER_LOG" >&2
-        printf 'Score server did not become ready within %s seconds\n' "$START_TIMEOUT" >&2
+        printf 'Score server pool did not become ready within %s seconds\n' "$START_TIMEOUT" >&2
         exit 1
     fi
     sleep 1
@@ -175,7 +204,8 @@ if [[ "$MODE" == check ]]; then
     cat "$READY_PATH"
 fi
 
-export FUNSEARCH_NEWTON_SOCKET="$SOCKET_PATH"
+SOCKET_LIST=$(printf '%s:' "${SOCKET_PATHS[@]}")
+export FUNSEARCH_NEWTON_SOCKET=${SOCKET_LIST%:}
 if [[ "$MODE" == check ]]; then
     make -C "$PROBLEM_DIR/evaluator" init_probe FS_PACK="$PACK_DIR"
     "$PROBLEM_DIR/evaluator/init_probe" "$INSTANCE"
@@ -190,9 +220,9 @@ printf -v START_HOOK_BODY '%q %q %q %q "$1" && %q "$1"' \
     "$READY_PATH" "$PACK_DIR/scripts/on-start.sh"
 printf -v START_HOOK 'sh -c %q fs-hook' "$START_HOOK_BODY"
 printf -v FINISH_HOOK_BODY \
-    '%q "$1"; pack_status=$?; %q %q %q %q %q %q "$1"; stop_status=$?; [ "$pack_status" -eq 0 ] && [ "$stop_status" -eq 0 ]' \
+    '%q "$1"; pack_status=$?; %q %q %q %q "$1"; stop_status=$?; [ "$pack_status" -eq 0 ] && [ "$stop_status" -eq 0 ]' \
     "$PACK_DIR/scripts/on-finish.sh" "$SCRIPT_DIR/stop_score_server.sh" \
-    "$SERVER_PID" "$RUNTIME_DIR" "$SOCKET_PATH" "$PENDING_CURVES" "$PENDING_LOG"
+    "$RUNTIME_DIR" "$PENDING_CURVES" "$PENDING_LOG"
 printf -v FINISH_HOOK 'sh -c %q fs-hook' "$FINISH_HOOK_BODY"
 
 RUN_OUTPUT=$(run_funsearch run start "$PROBLEM_DIR" \

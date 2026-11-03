@@ -35,11 +35,14 @@ def option(name):
 ready_path = Path(option("--ready-file"))
 socket_path = Path(option("--socket"))
 curves_path = Path(option("--curves"))
-Path(os.environ["MOCK_LAUNCH_STATE"]).write_text(json.dumps({
+thread_option = next((arg for arg in args if arg.startswith("--threads=")), None)
+server_index = socket_path.stem.rsplit("-", 1)[1]
+Path(os.environ["MOCK_LAUNCH_STATE"] + "." + server_index).write_text(json.dumps({
     "pid": os.getpid(),
     "ready": str(ready_path),
     "socket": str(socket_path),
     "curves": str(curves_path),
+    "thread_option": thread_option,
 }))
 
 mode = os.environ.get("MOCK_JULIA_MODE", "ready")
@@ -47,7 +50,8 @@ if mode == "exit":
     print("mock score server startup failure", file=sys.stderr)
     raise SystemExit(23)
 if mode == "ready":
-    ready_path.write_text(json.dumps({"pid": os.getpid()}) + "\n")
+    thread_count = int(thread_option.split("=", 1)[1]) if thread_option else None
+    ready_path.write_text(json.dumps({"pid": os.getpid(), "thread_count": thread_count}) + "\n")
 time.sleep(60)
 PY
 
@@ -68,6 +72,12 @@ start_hook = option("--on-start")
 finish_hook = option("--on-finish")
 run_id = option("--run-id")
 problem = Path(args[args.index("start") + 1])
+socket_paths = os.environ.get("FUNSEARCH_NEWTON_SOCKET", "").split(":")
+state_base = Path(os.environ["MOCK_LAUNCH_STATE"])
+state_files = list(state_base.parent.glob(state_base.name + ".*"))
+server_sockets = {json.loads(path.read_text())["socket"] for path in state_files}
+if len(socket_paths) != len(state_files) or set(socket_paths) != server_sockets:
+    raise SystemExit("launcher did not export every score-server socket")
 start_parts = shlex.split(start_hook)
 finish_parts = shlex.split(finish_hook)
 if start_parts[:2] != ["sh", "-c"] or finish_parts[:2] != ["sh", "-c"]:
@@ -76,7 +86,9 @@ if "attach_run_artifacts.sh" not in start_parts[2] or "scripts/on-start.sh" not 
     raise SystemExit(f"start hook is missing an artifact or pack lifecycle hook: {start_parts[2]!r}")
 if "scripts/on-finish.sh" not in finish_parts[2] or "stop_score_server.sh" not in finish_parts[2]:
     raise SystemExit("finish hook is missing a pack or server lifecycle hook")
-pending_curves = Path(json.loads(Path(os.environ["MOCK_LAUNCH_STATE"]).read_text())["curves"])
+if not state_files:
+    raise SystemExit("launcher did not start any score servers")
+pending_curves = Path(json.loads(state_files[0].read_text())["curves"])
 mode = os.environ.get("MOCK_FUNSEARCH_MODE", "complete")
 
 if mode == "fail-before-start-hook":
@@ -150,6 +162,7 @@ export PYTHON_BIN
 export JULIA_BIN="$MOCK_JULIA"
 export MOCK_LAUNCH_STATE="$STATE_FILE"
 export FUNSEARCH_PACK="$MOCK_PACK"
+export FUNSEARCH_NEWTON_SERVERS=2
 export PACK_START_LOG PACK_FINISH_LOG STOP_PS_LOG REAL_PS
 export PATH="$MOCK_BIN:$PATH"
 
@@ -157,14 +170,45 @@ assert_clean_runtime() {
     local pending_curves=$1 pending_log=$2 state_file=$3
     [[ ! -e "$pending_curves" && ! -L "$pending_curves" ]]
     [[ ! -e "$pending_log" && ! -L "$pending_log" ]]
-    if [[ -f "$state_file" ]]; then
-        local runtime_dir pid state
-        runtime_dir=$("$PYTHON_BIN" -c 'import json,sys; print(json.load(open(sys.argv[1]))["socket"].rsplit("/",1)[0])' "$state_file")
-        pid=$("$PYTHON_BIN" -c 'import json,sys; print(json.load(open(sys.argv[1]))["pid"])' "$state_file")
-        [[ ! -e "$runtime_dir" ]]
-        state=$(ps -p "$pid" -o stat= 2>/dev/null || true)
-        [[ -z "$state" || "$state" == Z* ]]
-    fi
+    "$PYTHON_BIN" - "$state_file" <<'PY'
+import glob
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+for state_path in glob.glob(sys.argv[1] + ".*"):
+    record = json.loads(Path(state_path).read_text())
+    runtime_dir = Path(record["socket"]).parent
+    if runtime_dir.exists():
+        raise SystemExit(f"runtime directory still exists: {runtime_dir}")
+    result = subprocess.run(["ps", "-p", str(record["pid"]), "-o", "stat="], capture_output=True, text=True)
+    state = result.stdout.strip()
+    if state and not state.startswith("Z"):
+        raise SystemExit(f"server process is still alive: {record['pid']} ({state})")
+PY
+}
+
+assert_pool_state() {
+    local state_file=$1 expected_count=$2
+    "$PYTHON_BIN" - "$state_file" "$expected_count" <<'PY'
+import glob
+import json
+import sys
+from pathlib import Path
+
+files = glob.glob(sys.argv[1] + ".*")
+if len(files) != int(sys.argv[2]):
+    raise SystemExit(f"expected {sys.argv[2]} servers, found {len(files)}")
+for state_path in files:
+    record = json.loads(Path(state_path).read_text())
+    if record["thread_option"] != "--threads=1":
+        raise SystemExit(f"server is not single-threaded: {record['thread_option']}")
+PY
+}
+
+clear_state() {
+    rm -f "$STATE_FILE" "$STATE_FILE".*
 }
 
 run_id=retryable
@@ -172,16 +216,17 @@ pending_curves="$PROBLEM_DIR/runs/.$run_id.curves.jsonl"
 pending_log="$PROBLEM_DIR/runs/.$run_id.server.log"
 
 # A server that exits before readiness must leave no process or runtime dir.
-rm -f "$STATE_FILE"
+clear_state
 if MOCK_JULIA_MODE=exit MOCK_FUNSEARCH_MODE=complete \
     FUNSEARCH_NEWTON_START_TIMEOUT_S=2 "$LAUNCHER" run "$PROBLEM_DIR" --run-id "$run_id"; then
     echo "expected an early server exit to fail" >&2
     exit 1
 fi
+assert_pool_state "$STATE_FILE" 2
 assert_clean_runtime "$pending_curves" "$pending_log" "$STATE_FILE"
 
 # Readiness timeout follows the same cleanup path.
-rm -f "$STATE_FILE"
+clear_state
 if MOCK_JULIA_MODE=wait MOCK_FUNSEARCH_MODE=complete \
     FUNSEARCH_NEWTON_START_TIMEOUT_S=1 "$LAUNCHER" run "$PROBLEM_DIR" --run-id "$run_id"; then
     echo "expected readiness timeout to fail" >&2
@@ -191,7 +236,7 @@ assert_clean_runtime "$pending_curves" "$pending_log" "$STATE_FILE"
 
 # A failed engine start may leave a regular curves file before its hook runs.
 # The next attempt with the same run id must be able to complete successfully.
-rm -f "$STATE_FILE"
+clear_state
 if MOCK_JULIA_MODE=ready MOCK_FUNSEARCH_MODE=fail-before-start-hook \
     FUNSEARCH_NEWTON_START_TIMEOUT_S=3 "$LAUNCHER" run "$PROBLEM_DIR" --run-id "$run_id"; then
     echo "expected a pre-hook engine failure" >&2
@@ -199,7 +244,8 @@ if MOCK_JULIA_MODE=ready MOCK_FUNSEARCH_MODE=fail-before-start-hook \
 fi
 assert_clean_runtime "$pending_curves" "$pending_log" "$STATE_FILE"
 
-rm -f "$STATE_FILE" "$PACK_START_LOG"
+clear_state
+rm -f "$PACK_START_LOG"
 attach_fail_run_id="$run_id-attach-fail"
 if MOCK_JULIA_MODE=ready MOCK_FUNSEARCH_MODE=fail-attach \
     FUNSEARCH_NEWTON_START_TIMEOUT_S=3 "$LAUNCHER" run "$PROBLEM_DIR" --run-id "$attach_fail_run_id" \
@@ -213,7 +259,8 @@ assert_clean_runtime "$attach_fail_curves" "$attach_fail_log" "$STATE_FILE"
 [[ ! -s "$PACK_START_LOG" ]]
 grep -q "Pending curve log is missing" "$TMP_ROOT/fail-attach.out"
 
-rm -f "$STATE_FILE" "$PACK_START_LOG" "$PACK_FINISH_LOG" "$STOP_PS_LOG"
+clear_state
+rm -f "$PACK_START_LOG" "$PACK_FINISH_LOG" "$STOP_PS_LOG"
 start_fail_run_id="$run_id-start-fail"
 if MOCK_JULIA_MODE=ready MOCK_FUNSEARCH_MODE=complete MOCK_PACK_START_FAIL=1 \
     FUNSEARCH_NEWTON_START_TIMEOUT_S=3 "$LAUNCHER" run "$PROBLEM_DIR" --run-id "$start_fail_run_id" \
@@ -230,19 +277,24 @@ assert_clean_runtime "$start_fail_curves" "$start_fail_log" "$STATE_FILE"
 grep -q "mock pack on-start failure" "$TMP_ROOT/fail-start.out"
 grep -q "mock run start hook failed" "$TMP_ROOT/fail-start.out"
 
-rm -f "$STATE_FILE"
+clear_state
 rm -f "$PACK_START_LOG" "$PACK_FINISH_LOG" "$STOP_PS_LOG"
 output=$(MOCK_JULIA_MODE=ready MOCK_FUNSEARCH_MODE=complete \
-    FUNSEARCH_NEWTON_START_TIMEOUT_S=3 "$LAUNCHER" run "$PROBLEM_DIR" --run-id "$run_id")
+    FUNSEARCH_NEWTON_SERVERS=4 FUNSEARCH_NEWTON_START_TIMEOUT_S=3 \
+    "$LAUNCHER" run "$PROBLEM_DIR" --run-id "$run_id")
 [[ "$output" == *"mock run complete"* ]]
 assert_clean_runtime "$pending_curves" "$pending_log" "$STATE_FILE"
 [[ -s "$PROBLEM_DIR/runs/$run_id/curves.jsonl" ]]
 [[ -f "$PROBLEM_DIR/runs/$run_id/server-ready.json" ]]
+assert_pool_state "$STATE_FILE" 4
+[[ "$("$PYTHON_BIN" -c 'import json,sys; r=json.load(open(sys.argv[1])); print(r["server_count"],len(r["servers"]))' "$PROBLEM_DIR/runs/$run_id/server-ready.json")" == "4 4" ]]
+[[ "$("$PYTHON_BIN" -c 'import json,sys; r=json.load(open(sys.argv[1])); print(all(x["thread_count"] == 1 for x in r["servers"]))' "$PROBLEM_DIR/runs/$run_id/server-ready.json")" == "True" ]]
 [[ "$(cat "$PACK_START_LOG")" == "$PROBLEM_DIR/runs/$run_id" ]]
 [[ "$(cat "$PACK_FINISH_LOG")" == "$PROBLEM_DIR/runs/$run_id" ]]
 [[ -s "$STOP_PS_LOG" ]]
 
-rm -f "$STATE_FILE" "$PACK_START_LOG" "$PACK_FINISH_LOG" "$STOP_PS_LOG"
+clear_state
+rm -f "$PACK_START_LOG" "$PACK_FINISH_LOG" "$STOP_PS_LOG"
 if MOCK_JULIA_MODE=ready MOCK_FUNSEARCH_MODE=complete MOCK_PACK_FINISH_FAIL=1 \
     FUNSEARCH_NEWTON_START_TIMEOUT_S=3 "$LAUNCHER" run "$PROBLEM_DIR" --run-id "$run_id-finish-fail" \
     >"$TMP_ROOT/fail-finish.out" 2>&1; then

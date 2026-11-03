@@ -579,11 +579,18 @@ function _append_records(path::AbstractString, records)
     isempty(records) && return nothing
     mkpath(dirname(abspath(path)))
     open(path, "a") do output
-        for record in records
-            write(output, JSON.json(record))
-            write(output, '\n')
+        descriptor = Base.fd(output)
+        ccall(:flock, Cint, (Cint, Cint), descriptor, Cint(2)) == 0 ||
+            throw(ErrorException("could not lock curve retention file"))
+        try
+            for record in records
+                write(output, JSON.json(record))
+                write(output, '\n')
+            end
+            flush(output)
+        finally
+            ccall(:flock, Cint, (Cint, Cint), descriptor, Cint(8))
         end
-        flush(output)
     end
     nothing
 end
@@ -790,6 +797,7 @@ function _ready_record(warmup_seconds::Float64, warmup_response, precision)
         "sysimage" => get(ENV, "KAIMON_CITY_SYSIMAGE", "off"),
         "julia_image_file" => unsafe_string(Base.JLOptions().image_file),
         "julia_version" => string(VERSION),
+        "thread_count" => Threads.nthreads(),
         "ready_at" => string(Dates.now(Dates.UTC), "Z"),
     )
 end

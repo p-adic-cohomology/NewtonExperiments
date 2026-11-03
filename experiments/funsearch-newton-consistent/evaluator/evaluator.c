@@ -20,6 +20,8 @@
 #define REQUEST_BYTES 65536
 #define RESPONSE_BYTES 16384
 #define MAX_SAMPLES 64
+#define MAX_SOCKET_CHOICES 16
+#define MAX_SOCKET_LIST_BYTES 4096
 
 typedef void (*curve_fn)(int32_t, int32_t, int32_t[21]);
 
@@ -60,13 +62,39 @@ static int load_socket_path(const char *path, char *message, size_t message_size
             snprintf(message, message_size, "%s", "FUNSEARCH_NEWTON_SOCKET is not set");
         return -1;
     }
-    size_t length = strlen(path);
-    if (length >= sizeof(server_socket_path)) {
+    size_t list_length = strnlen(path, MAX_SOCKET_LIST_BYTES + 1);
+    if (list_length > MAX_SOCKET_LIST_BYTES) {
         if (message_size > 0)
-            snprintf(message, message_size, "%s", "FUNSEARCH_NEWTON_SOCKET is too long");
+            snprintf(message, message_size, "%s", "FUNSEARCH_NEWTON_SOCKET list is too long");
         return -1;
     }
-    memcpy(server_socket_path, path, length + 1);
+    char choices[MAX_SOCKET_CHOICES][sizeof(server_socket_path)];
+    size_t count = 0;
+    const char *cursor = path;
+    const char *end = path + list_length;
+    while (cursor <= end) {
+        const char *separator = memchr(cursor, ':', (size_t)(end - cursor));
+        const char *choice_end = separator == NULL ? end : separator;
+        size_t length = (size_t)(choice_end - cursor);
+        if (length == 0 || length >= sizeof(choices[0])) {
+            if (message_size > 0)
+                snprintf(message, message_size, "%s", "FUNSEARCH_NEWTON_SOCKET contains an empty or too-long path");
+            return -1;
+        }
+        if (count == MAX_SOCKET_CHOICES) {
+            if (message_size > 0)
+                snprintf(message, message_size, "%s", "FUNSEARCH_NEWTON_SOCKET has too many paths");
+            return -1;
+        }
+        memcpy(choices[count], cursor, length);
+        choices[count][length] = '\0';
+        ++count;
+        if (separator == NULL)
+            break;
+        cursor = separator + 1;
+    }
+    size_t selected = (size_t)((unsigned long)getpid() % count);
+    memcpy(server_socket_path, choices[selected], strlen(choices[selected]) + 1);
     return 0;
 }
 

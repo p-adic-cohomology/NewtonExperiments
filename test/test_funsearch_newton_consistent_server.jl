@@ -10,6 +10,7 @@ using Test
 
 const server_module = FunSearchNewtonConsistentServer
 const strata = server_module.NewtonStrata
+const NONORDINARY_FIXTURES = Dict{Int,Vector{Int}}()
 
 function test_instance(p; k=16, curve_reward="log", lambda=0.25, beta=0.5, ss_codim=1)
     "family=plane,d=5,p=$p,k=$k,curve_reward=$curve_reward,lambda=$lambda,beta=$beta,ss_codim=$ss_codim"
@@ -119,6 +120,11 @@ function random_invertible_matrix(rng, p)
 end
 
 function random_nonordinary_curve(p, rng)
+    if p == 7
+        coefficients = copy(server_module.FERMAT_COEFFICIENTS)
+        coefficients[15] = 2
+        return coefficients
+    end
     for _ in 1:100
         coefficients = rand(rng, 0:(p - 1), 21)
         any(!iszero, coefficients) || continue
@@ -318,6 +324,7 @@ end
         for p in (7, 11, 13)
             rng = MersenneTwister(0x50474c33 + p)
             base = random_nonordinary_curve(p, rng)
+            NONORDINARY_FIXTURES[p] = copy(base)
             transformed = [
                 transform_curve(base, random_invertible_matrix(rng, p), p)
                 for _ in 1:3
@@ -329,6 +336,56 @@ end
             @test length(unique(sample.zeta_key for sample in details.samples)) == 1
             @test details.response["sig"][3] == 1 / 4
         end
+    end
+
+    @testset "24 real samples retain in input order" begin
+        singular_indices = (
+            findfirst(==((5, 0, 0)), server_module.MONOMIAL_EXPONENTS),
+            findfirst(==((4, 1, 0)), server_module.MONOMIAL_EXPONENTS),
+        )
+        all_samples = Any[]
+        sample_details = Dict{Int,Any}()
+        for p in (7, 11, 13)
+            rng = MersenneTwister(0x53455249414c + p)
+            base = NONORDINARY_FIXTURES[p]
+            transformed = [
+                transform_curve(base, random_invertible_matrix(rng, p), p)
+                for _ in 1:2
+            ]
+            singular_curves = Vector{Int}[]
+            for coefficient in 1:4
+                singular = zeros(Int, 21)
+                singular[singular_indices[1]] = 1
+                singular[singular_indices[2]] = coefficient
+                push!(singular_curves, singular)
+            end
+            samples = [copy(server_module.FERMAT_COEFFICIENTS), copy(base), transformed..., singular_curves...]
+            @test length(samples) == 8
+            instance = test_instance(p; k=length(samples))
+            details = server_module._score_details(instance, samples)
+            @test details.response["status"] == "OK"
+            @test length(details.samples) == 8
+
+            request = Dict{String,Any}(
+                "program_id" => "thread-equivalence-p$p",
+                "instance" => instance,
+                "samples" => samples,
+            )
+            timestamp = "2026-01-01T00:00:00Z"
+            records = [
+                server_module._retention_record(details, sample, request, 1.0, "serial-batch", timestamp)
+                for sample in details.samples
+            ]
+            @test [record["k"] for record in records] == collect(0:7)
+            @test all(record["batch_id"] == "serial-batch" for record in records)
+            sample_details[p] = details.samples
+            append!(all_samples, details.samples)
+        end
+        @test length(all_samples) == 24
+        @test any(sample -> sample.status == "INVALID", all_samples)
+        @test any(sample -> sample.status == "OK" && sample.supersingular, all_samples)
+        @test any(sample -> sample.status == "OK" && sample.codim == 0, sample_details[11])
+        @test any(sample -> sample.status == "OK" && sample.codim > 0, sample_details[7])
     end
 
     @testset "Measurement sample classification" begin
@@ -364,6 +421,7 @@ end
                 ready = JSON.parse(read(ready_path, String))
                 @test ready["status"] == "ready"
                 @test ready["julia_version"] == string(VERSION)
+                @test ready["thread_count"] == Threads.nthreads()
                 @test occursin("funsearch-newton/reference", join(ready["reference_tables"], " "))
                 connection = Sockets.connect(socket_path)
                 request = Dict{String,Any}(

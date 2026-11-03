@@ -35,13 +35,20 @@ def option(name):
 ready_path = Path(option("--ready-file"))
 socket_path = Path(option("--socket"))
 curves_path = Path(option("--curves"))
+near_dup_index_path = Path(option("--near-dup-index"))
+near_dup_cache_path = near_dup_index_path.with_name(near_dup_index_path.stem + ".cache.jsonl")
+near_dup_lock_path = Path(str(near_dup_index_path) + ".lock")
 thread_option = next((arg for arg in args if arg.startswith("--threads=")), None)
 server_index = socket_path.stem.rsplit("-", 1)[1]
+near_dup_index_path.touch(exist_ok=True)
+near_dup_cache_path.touch(exist_ok=True)
+near_dup_lock_path.touch(exist_ok=True)
 Path(os.environ["MOCK_LAUNCH_STATE"] + "." + server_index).write_text(json.dumps({
     "pid": os.getpid(),
     "ready": str(ready_path),
     "socket": str(socket_path),
     "curves": str(curves_path),
+    "near_dup_index": str(near_dup_index_path),
     "thread_option": thread_option,
 }))
 
@@ -123,6 +130,7 @@ cat > "$MOCK_PACK/scripts/on-start.sh" <<'SH'
 set -euo pipefail
 RUN_DIR=$1
 [[ -f "$RUN_DIR/curves.jsonl" ]]
+[[ -f "$RUN_DIR/near-dup-index.jsonl" ]]
 [[ -f "$RUN_DIR/server-ready.json" ]]
 printf '%s\n' "$RUN_DIR" >> "$PACK_START_LOG"
 if [[ ${MOCK_PACK_START_FAIL:-0} == 1 ]]; then
@@ -168,7 +176,13 @@ export PATH="$MOCK_BIN:$PATH"
 
 assert_clean_runtime() {
     local pending_curves=$1 pending_log=$2 state_file=$3
+    local pending_index="${pending_curves%.curves.jsonl}.near-dup-index.jsonl"
+    local pending_cache="${pending_index%.jsonl}.cache.jsonl"
+    local pending_lock="$pending_index.lock"
     [[ ! -e "$pending_curves" && ! -L "$pending_curves" ]]
+    [[ ! -e "$pending_index" && ! -L "$pending_index" ]]
+    [[ ! -e "$pending_cache" && ! -L "$pending_cache" ]]
+    [[ ! -e "$pending_lock" && ! -L "$pending_lock" ]]
     [[ ! -e "$pending_log" && ! -L "$pending_log" ]]
     "$PYTHON_BIN" - "$state_file" <<'PY'
 import glob
@@ -285,6 +299,8 @@ output=$(MOCK_JULIA_MODE=ready MOCK_FUNSEARCH_MODE=complete \
 [[ "$output" == *"mock run complete"* ]]
 assert_clean_runtime "$pending_curves" "$pending_log" "$STATE_FILE"
 [[ -s "$PROBLEM_DIR/runs/$run_id/curves.jsonl" ]]
+[[ -f "$PROBLEM_DIR/runs/$run_id/near-dup-index.jsonl" ]]
+[[ -f "$PROBLEM_DIR/runs/$run_id/near-dup-index.cache.jsonl" ]]
 [[ -f "$PROBLEM_DIR/runs/$run_id/server-ready.json" ]]
 assert_pool_state "$STATE_FILE" 4
 [[ "$("$PYTHON_BIN" -c 'import json,sys; r=json.load(open(sys.argv[1])); print(r["server_count"],len(r["servers"]))' "$PROBLEM_DIR/runs/$run_id/server-ready.json")" == "4 4" ]]

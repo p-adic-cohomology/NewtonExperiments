@@ -661,46 +661,103 @@ mutable struct NearDuplicateStore
     cache_path::String
     lock_path::String
     records::Vector{Dict{String,Any}}
-    cache_records::Vector{Dict{String,Any}}
     cache::Dict{String,Dict{String,Any}}
+    by_instance_key::Dict{Tuple{String,String},Vector{Dict{String,Any}}}
+    record_positions::IdDict{Dict{String,Any},Int}
+    index_offset::Int64
+    cache_offset::Int64
     lock::ReentrantLock
 end
 
-function _read_jsonl_records(path::AbstractString)
-    isfile(path) || return Dict{String,Any}[]
-    records = Dict{String,Any}[]
-    for (line_number, line) in enumerate(eachline(path))
-        isempty(strip(line)) && continue
-        parsed = JSON.parse(line)
-        parsed isa AbstractDict || throw(ArgumentError("JSONL record $line_number in $path is not an object"))
-        push!(records, Dict{String,Any}(string(key) => value for (key, value) in parsed))
+function _read_jsonl_records_from(path::AbstractString, offset::Int64)
+    if !isfile(path)
+        return Dict{String,Any}[], Int64(0), offset > 0
     end
-    records
+    reset = filesize(path) < offset
+    start_offset = reset ? Int64(0) : offset
+    records = Dict{String,Any}[]
+    final_offset = start_offset
+    open(path, "r") do input
+        seek(input, start_offset)
+        for (line_number, line) in enumerate(eachline(input))
+            isempty(strip(line)) && continue
+            parsed = JSON.parse(line)
+            parsed isa AbstractDict || throw(ArgumentError("JSONL record $line_number in $path is not an object"))
+            push!(records, Dict{String,Any}(string(key) => value for (key, value) in parsed))
+        end
+        final_offset = Int64(position(input))
+    end
+    records, final_offset, reset
+end
+
+function _index_store_record!(store::NearDuplicateStore, record::Dict{String,Any})
+    store.record_positions[record] = length(store.records)
+    instance = string(get(record, "instance", ""))
+    seen = Set{String}()
+    for raw_key in get(record, "nonordinary_keys", Any[])
+        key = string(raw_key)
+        key in seen && continue
+        push!(seen, key)
+        posting = get!(store.by_instance_key, (instance, key)) do
+            Dict{String,Any}[]
+        end
+        push!(posting, record)
+    end
+    nothing
+end
+
+function _cache_index_record!(store::NearDuplicateStore, record::Dict{String,Any})
+    cache_key = string(get(record, "cache_key", ""))
+    response = get(record, "response", nothing)
+    isempty(cache_key) && return nothing
+    response isa AbstractDict || return nothing
+    haskey(store.cache, cache_key) && return nothing
+    store.cache[cache_key] = Dict{String,Any}(
+        "cache_key" => cache_key,
+        "response" => Dict{String,Any}(string(key) => value for (key, value) in response),
+        "program_status" => get(response, "status", "OK"),
+        "near_duplicate_of" => nothing,
+        "near_dup_overlap" => nothing,
+    )
+    nothing
 end
 
 function _refresh_store!(store::NearDuplicateStore)
-    store.records = _read_jsonl_records(store.path)
-    store.cache_records = _read_jsonl_records(store.cache_path)
-    cache = Dict{String,Dict{String,Any}}()
-    for record in store.cache_records
-        cache_key = string(get(record, "cache_key", ""))
-        isempty(cache_key) || (cache[cache_key] = record)
+    cache_records, cache_offset, cache_reset =
+        _read_jsonl_records_from(store.cache_path, store.cache_offset)
+    index_records, index_offset, index_reset =
+        _read_jsonl_records_from(store.path, store.index_offset)
+    if index_reset && !cache_reset
+        cache_records, cache_offset, cache_reset =
+            _read_jsonl_records_from(store.cache_path, Int64(0))
     end
-    for record in store.records
-        cache_key = string(get(record, "cache_key", ""))
-        response = get(record, "response", nothing)
-        isempty(cache_key) && continue
-        response isa AbstractDict || continue
-        haskey(cache, cache_key) && continue
-        cache[cache_key] = Dict{String,Any}(
-            "cache_key" => cache_key,
-            "response" => Dict{String,Any}(string(key) => value for (key, value) in response),
-            "program_status" => get(response, "status", "OK"),
-            "near_duplicate_of" => nothing,
-            "near_dup_overlap" => nothing,
-        )
+
+    if cache_reset
+        empty!(store.cache)
     end
-    store.cache = cache
+    if index_reset
+        empty!(store.records)
+        empty!(store.by_instance_key)
+        empty!(store.record_positions)
+    end
+
+    for record in cache_records
+        cache_key = string(get(record, "cache_key", ""))
+        isempty(cache_key) || (store.cache[cache_key] = record)
+    end
+    for record in index_records
+        push!(store.records, record)
+        _index_store_record!(store, record)
+        _cache_index_record!(store, record)
+    end
+    store.cache_offset = cache_offset
+    store.index_offset = index_offset
+
+    if cache_reset || index_reset
+        for record in store.records
+            _cache_index_record!(store, record)
+        end
+    end
     store
 end
 
@@ -729,8 +786,11 @@ function NearDuplicateStore(index_path::AbstractString)
         cache_path,
         path * ".lock",
         Dict{String,Any}[],
-        Dict{String,Any}[],
         Dict{String,Dict{String,Any}}(),
+        Dict{Tuple{String,String},Vector{Dict{String,Any}}}(),
+        IdDict{Dict{String,Any},Int}(),
+        Int64(0),
+        Int64(0),
         ReentrantLock(),
     )
     _with_store_lock(store) do
@@ -739,44 +799,45 @@ function NearDuplicateStore(index_path::AbstractString)
     store
 end
 
-function _rewrite_jsonl(path::AbstractString, records)
-    open(path, "w") do output
-        for record in records
-            write(output, JSON.json(record))
-            write(output, '\n')
-        end
+function _truncate_file(path::AbstractString, offset::Int64)
+    open(path, "a+") do output
+        truncate(output, offset)
         flush(output)
     end
     nothing
 end
 
-function _find_near_duplicate(details, records)
+function _find_near_duplicate(details, store::NearDuplicateStore)
     config = details.config
     config === nothing && return nothing
     get(details.response, "status", nothing) == "OK" || return nothing
     config.near_dup > 0 || return nothing
     candidate_keys = _nonordinary_keys(details)
     isempty(candidate_keys) && return nothing
-    candidate_set = Set(candidate_keys)
     instance = _instance_key(config)
+    overlap_counts = IdDict{Dict{String,Any},Int}()
+    for key in candidate_keys
+        for record in get(store.by_instance_key, (instance, key), Dict{String,Any}[])
+            overlap_counts[record] = get(overlap_counts, record, 0) + 1
+        end
+    end
     best = nothing
-    for record in records
-        get(record, "instance", nothing) == instance || continue
-        previous_keys = Set(String[string(key) for key in get(record, "nonordinary_keys", Any[])])
-        isempty(previous_keys) && continue
-        overlap_count = count(key -> key in previous_keys, candidate_set)
-        overlap = overlap_count / length(candidate_set)
+    best_position = typemax(Int)
+    for (record, overlap_count) in overlap_counts
+        overlap = overlap_count / length(candidate_keys)
         overlap >= config.near_dup || continue
         previous_score = Float64(get(record, "score", Inf))
         details.program_score <= previous_score + 1.0e-9 || continue
-        if best === nothing || overlap > best.overlap
+        position = get(store.record_positions, record, typemax(Int))
+        if best === nothing || overlap > best.overlap || (overlap == best.overlap && position < best_position)
             best = (
                 record=record,
                 overlap_count=overlap_count,
-                total=length(candidate_set),
+                total=length(candidate_keys),
                 overlap=overlap,
                 score=previous_score,
             )
+            best_position = position
         end
     end
     best
@@ -906,12 +967,18 @@ function _request_response(
             ]
             try
                 _append_records(curves_path, records)
-            catch
+            catch error
+                return Dict{String,Any}(
+                    "status" => "ERROR",
+                    "score" => 0.0,
+                    "sig" => _empty_signature(),
+                    "msg" => "curve retention failed: $(sprint(showerror, error))",
+                )
             end
             return cached_response
         end
 
-        match = _find_near_duplicate(details, store.records)
+        match = _find_near_duplicate(details, store)
         response = match === nothing ? details.response : _near_duplicate_response(details, match)
         program_status = response["status"]
         near_duplicate_of = match === nothing ? nothing : string(get(match.record, "batch_id", ""))
@@ -937,29 +1004,30 @@ function _request_response(
             "near_duplicate_of" => near_duplicate_of,
             "near_dup_overlap" => near_dup_overlap,
         )
-        old_records = copy(store.records)
-        old_cache_records = copy(store.cache_records)
+        index_record = if details.response["status"] == "OK" && match === nothing
+            Dict{String,Any}(
+                "batch_id" => batch_id,
+                "instance" => _instance_key(details.config),
+                "nonordinary_keys" => _nonordinary_keys(details),
+                "score" => details.program_score,
+                "timestamp" => timestamp,
+                "cache_key" => cache_key,
+                "response" => response,
+            )
+        else
+            nothing
+        end
+        old_index_offset = store.index_offset
+        old_cache_offset = store.cache_offset
         try
-            if details.response["status"] == "OK" && match === nothing
-                index_record = Dict{String,Any}(
-                    "batch_id" => batch_id,
-                    "instance" => _instance_key(details.config),
-                    "nonordinary_keys" => _nonordinary_keys(details),
-                    "score" => details.program_score,
-                    "timestamp" => timestamp,
-                    "cache_key" => cache_key,
-                    "response" => response,
-                )
+            if index_record !== nothing
                 _append_records(store.path, [index_record])
-                push!(store.records, index_record)
             end
             _append_records(store.cache_path, [cache_record])
-            push!(store.cache_records, cache_record)
         catch error
             try
-                _rewrite_jsonl(store.path, old_records)
-                _rewrite_jsonl(store.cache_path, old_cache_records)
-                _refresh_store!(store)
+                _truncate_file(store.path, old_index_offset)
+                _truncate_file(store.cache_path, old_cache_offset)
             catch
             end
             return Dict{String,Any}(
@@ -973,9 +1041,8 @@ function _request_response(
             _append_records(curves_path, records)
         catch error
             try
-                _rewrite_jsonl(store.path, old_records)
-                _rewrite_jsonl(store.cache_path, old_cache_records)
-                _refresh_store!(store)
+                _truncate_file(store.path, old_index_offset)
+                _truncate_file(store.cache_path, old_cache_offset)
             catch
             end
             return Dict{String,Any}(
@@ -985,6 +1052,12 @@ function _request_response(
                 "msg" => "curve retention failed: $(sprint(showerror, error))",
             )
         end
+        if index_record !== nothing
+            push!(store.records, index_record)
+            _index_store_record!(store, index_record)
+            store.index_offset = Int64(filesize(store.path))
+        end
+        store.cache_offset = Int64(filesize(store.cache_path))
         store.cache[cache_key] = cache_record
         response
     end

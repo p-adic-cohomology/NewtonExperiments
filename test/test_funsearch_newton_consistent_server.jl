@@ -524,6 +524,33 @@ end
         mktempdir() do directory
             curves_path = joinpath(directory, "curves.jsonl")
             index_path = joinpath(directory, "near-dup-index.jsonl")
+            earlier = tagged_request([1, 3])
+            candidate = tagged_request([1, 2])
+            first_store = server_module.NearDuplicateStore(index_path)
+            second_store = server_module.NearDuplicateStore(index_path)
+            @test respond(earlier, curves_path, index_path, first_store)["status"] == "OK"
+            @test isempty(second_store.records)
+            response = respond(candidate, curves_path, index_path, second_store)
+            @test response["status"] == "INVALID"
+            @test length(second_store.records) == 1
+        end
+
+        mktempdir() do directory
+            curves_path = joinpath(directory, "curves.jsonl")
+            index_path = joinpath(directory, "near-dup-index.jsonl")
+            request = tagged_request([1, 3])
+            store = server_module.NearDuplicateStore(index_path)
+            @test respond(request, curves_path, index_path, store)["status"] == "OK"
+            rm(curves_path)
+            mkdir(curves_path)
+            response = respond(request, curves_path, index_path, store)
+            @test response["status"] == "ERROR"
+            @test startswith(response["msg"], "curve retention failed:")
+        end
+
+        mktempdir() do directory
+            curves_path = joinpath(directory, "curves.jsonl")
+            index_path = joinpath(directory, "near-dup-index.jsonl")
             ordinary_one = tagged_request([4, 4])
             ordinary_two = tagged_request([4, 4])
             ordinary_two["samples"][1][3] = 1

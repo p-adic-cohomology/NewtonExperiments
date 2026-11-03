@@ -19,6 +19,16 @@ PACK_START_LOG="$TMP_ROOT/pack-start.log"
 PACK_FINISH_LOG="$TMP_ROOT/pack-finish.log"
 STOP_PS_LOG="$TMP_ROOT/stop-ps.log"
 mkdir -p "$PROBLEM_DIR/evaluator" "$MOCK_PACK/scripts" "$MOCK_BIN"
+cat > "$PROBLEM_DIR/evaluator/Makefile" <<'MAKE'
+.PHONY: init_probe
+init_probe:
+	@:
+MAKE
+cat > "$PROBLEM_DIR/evaluator/init_probe" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+chmod +x "$PROBLEM_DIR/evaluator/init_probe"
 
 cat > "$MOCK_JULIA" <<'PY'
 #!/usr/bin/env python3
@@ -75,16 +85,39 @@ args = sys.argv[1:]
 def option(name):
     return args[args.index(name) + 1]
 
-start_hook = option("--on-start")
-finish_hook = option("--on-finish")
-run_id = option("--run-id")
-problem = Path(args[args.index("start") + 1])
+command = args[0]
+problem = Path(args[1] if command == "check" else args[args.index("start") + 1])
 socket_paths = os.environ.get("FUNSEARCH_NEWTON_SOCKET", "").split(":")
 state_base = Path(os.environ["MOCK_LAUNCH_STATE"])
 state_files = list(state_base.parent.glob(state_base.name + ".*"))
-server_sockets = {json.loads(path.read_text())["socket"] for path in state_files}
+server_records = [json.loads(path.read_text()) for path in state_files]
+server_sockets = {record["socket"] for record in server_records}
 if len(socket_paths) != len(state_files) or set(socket_paths) != server_sockets:
     raise SystemExit("launcher did not export every score-server socket")
+if not state_files:
+    raise SystemExit("launcher did not start any score servers")
+
+if command == "check":
+    run_root = problem / "runs"
+    for record in server_records:
+        runtime_dir = Path(record["socket"]).parent
+        index_path = Path(record["near_dup_index"])
+        if index_path != runtime_dir / "near-dup-index.jsonl":
+            raise SystemExit(f"check mode used a non-runtime index path: {index_path}")
+        try:
+            index_path.relative_to(run_root)
+        except ValueError:
+            pass
+        else:
+            raise SystemExit(f"check mode used a persistent run index: {index_path}")
+    print("mock check complete")
+    raise SystemExit(0)
+
+if command != "run" or args[1] != "start":
+    raise SystemExit(f"unexpected mock FunSearch command: {args[:2]!r}")
+start_hook = option("--on-start")
+finish_hook = option("--on-finish")
+run_id = option("--run-id")
 start_parts = shlex.split(start_hook)
 finish_parts = shlex.split(finish_hook)
 if start_parts[:2] != ["sh", "-c"] or finish_parts[:2] != ["sh", "-c"]:
@@ -93,9 +126,7 @@ if "attach_run_artifacts.sh" not in start_parts[2] or "scripts/on-start.sh" not 
     raise SystemExit(f"start hook is missing an artifact or pack lifecycle hook: {start_parts[2]!r}")
 if "scripts/on-finish.sh" not in finish_parts[2] or "stop_score_server.sh" not in finish_parts[2]:
     raise SystemExit("finish hook is missing a pack or server lifecycle hook")
-if not state_files:
-    raise SystemExit("launcher did not start any score servers")
-pending_curves = Path(json.loads(state_files[0].read_text())["curves"])
+pending_curves = Path(server_records[0]["curves"])
 mode = os.environ.get("MOCK_FUNSEARCH_MODE", "complete")
 
 if mode == "fail-before-start-hook":
@@ -203,6 +234,31 @@ for state_path in glob.glob(sys.argv[1] + ".*"):
 PY
 }
 
+assert_check_cleanup() {
+    local state_file=$1
+    "$PYTHON_BIN" - "$state_file" <<'PY'
+import glob
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+for state_path in glob.glob(sys.argv[1] + ".*"):
+    record = json.loads(Path(state_path).read_text())
+    runtime_dir = Path(record["socket"]).parent
+    index_path = Path(record["near_dup_index"])
+    cache_path = index_path.with_name(index_path.stem + ".cache.jsonl")
+    lock_path = Path(str(index_path) + ".lock")
+    for path in (runtime_dir, Path(record["curves"]), index_path, cache_path, lock_path, Path(record["ready"])):
+        if path.exists() or path.is_symlink():
+            raise SystemExit(f"check-mode temporary path still exists: {path}")
+    result = subprocess.run(["ps", "-p", str(record["pid"]), "-o", "stat="], capture_output=True, text=True)
+    state = result.stdout.strip()
+    if state and not state.startswith("Z"):
+        raise SystemExit(f"check-mode server process is still alive: {record['pid']} ({state})")
+PY
+}
+
 assert_pool_state() {
     local state_file=$1 expected_count=$2
     "$PYTHON_BIN" - "$state_file" "$expected_count" <<'PY'
@@ -224,6 +280,15 @@ PY
 clear_state() {
     rm -f "$STATE_FILE" "$STATE_FILE".*
 }
+
+# Check mode keeps the index, cache, and lock under its disposable runtime dir.
+clear_state
+check_output=$(MOCK_JULIA_MODE=ready MOCK_FUNSEARCH_MODE=complete \
+    FUNSEARCH_NEWTON_START_TIMEOUT_S=3 "$LAUNCHER" check "$PROBLEM_DIR")
+[[ "$check_output" == *"mock check complete"* ]]
+assert_pool_state "$STATE_FILE" 2
+assert_check_cleanup "$STATE_FILE"
+[[ ! -e "$PROBLEM_DIR/runs" ]]
 
 run_id=retryable
 pending_curves="$PROBLEM_DIR/runs/.$run_id.curves.jsonl"
@@ -325,4 +390,4 @@ assert_clean_runtime "$finish_pending_curves" "$finish_pending_log" "$STATE_FILE
 grep -q "mock pack on-finish failure" "$TMP_ROOT/fail-finish.out"
 grep -q "mock run finish hook failed" "$TMP_ROOT/fail-finish.out"
 
-echo "launcher lifecycle tests passed: readiness, cleanup, hook chaining, attach failure, start failure, finish failure"
+echo "launcher lifecycle tests passed: check-mode isolation, readiness, cleanup, hook chaining, attach failure, start failure, finish failure"

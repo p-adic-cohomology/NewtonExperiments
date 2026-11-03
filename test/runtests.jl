@@ -178,3 +178,4 @@ end
 end
 
 include("test_funsearch_newton_server.jl")
+include("test_funsearch_newton_consistent_server.jl")

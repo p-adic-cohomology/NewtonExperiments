@@ -262,10 +262,12 @@ end
         @test all_invalid.response["score"] == 0.0
         @test all(isfinite, all_invalid.response["sig"])
 
+        smooth_failure = copy(server_module.FERMAT_COEFFICIENTS)
+        smooth_failure[1] = 5
         failing_zeta = (curve; kwargs...) -> curve == 5 ? error("injected zeta failure") : [curve]
         evaluation_error = server_module._score_details(
             test_instance(7; k=2),
-            [valid, tagged_coefficients(5)];
+            [valid, smooth_failure];
             curve_builder=stubs.curve_builder,
             zeta_builder=failing_zeta,
             polygon_builder=stubs.polygon_builder,

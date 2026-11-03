@@ -306,10 +306,21 @@ function _score_sample(
             use_gpu=false,
         )
     catch error
+        singular = try
+            _is_singular_plane_quintic(config.p, coefficients)
+        catch smoothness_error
+            return _sample_result(
+                k,
+                "ERROR",
+                "DeRham zeta evaluation failed and singularity check failed: $(sprint(showerror, smoothness_error))";
+                coefficients=coefficients,
+            )
+        end
+        singular && return _sample_result(k, "INVALID", "curve is singular"; coefficients=coefficients)
         return _sample_result(
             k,
             "ERROR",
-            "DeRham zeta evaluation failed: $(sprint(showerror, error))";
+            "DeRham zeta evaluation failed for a smooth curve: $(sprint(showerror, error))";
             coefficients=coefficients,
         )
     end

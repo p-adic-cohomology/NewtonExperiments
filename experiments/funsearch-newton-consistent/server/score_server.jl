@@ -673,7 +673,14 @@ mutable struct NearDuplicateStore
     record_positions::IdDict{Dict{String,Any},Int}
     index_offset::Int64
     cache_offset::Int64
+    cache_file_identity::Union{Nothing,Tuple{UInt64,UInt64}}
     lock::ReentrantLock
+end
+
+function _near_dup_cache_file_identity(path::AbstractString)
+    isfile(path) || return nothing
+    metadata = stat(path)
+    (UInt64(metadata.device), UInt64(metadata.inode))
 end
 
 function _read_jsonl_records_from(path::AbstractString, offset::Int64)
@@ -759,6 +766,7 @@ function _compact_near_dup_cache!(store::NearDuplicateStore)
         store.cache_head = 1
         store.cache_file_records = length(retained_keys)
         store.cache_offset = Int64(filesize(store.cache_path))
+        store.cache_file_identity = _near_dup_cache_file_identity(store.cache_path)
     catch
         isopen(temporary_io) && close(temporary_io)
         isfile(temporary_path) && rm(temporary_path; force=true)
@@ -768,8 +776,14 @@ function _compact_near_dup_cache!(store::NearDuplicateStore)
 end
 
 function _refresh_store!(store::NearDuplicateStore)
+    cache_file_identity = _near_dup_cache_file_identity(store.cache_path)
+    cache_file_replaced = cache_file_identity != store.cache_file_identity
     cache_records, cache_offset, cache_reset =
-        _read_jsonl_records_from(store.cache_path, store.cache_offset)
+        _read_jsonl_records_from(
+            store.cache_path,
+            cache_file_replaced ? Int64(0) : store.cache_offset,
+        )
+    cache_reset |= cache_file_replaced
     index_records, index_offset, index_reset =
         _read_jsonl_records_from(store.path, store.index_offset)
     if index_reset && !cache_reset
@@ -800,6 +814,7 @@ function _refresh_store!(store::NearDuplicateStore)
         _index_store_record!(store, record)
     end
     store.cache_offset = cache_offset
+    store.cache_file_identity = cache_file_identity
     store.index_offset = index_offset
 
     if store.cache_file_records > 2 * store.cache_capacity
@@ -847,6 +862,7 @@ function NearDuplicateStore(
         IdDict{Dict{String,Any},Int}(),
         Int64(0),
         Int64(0),
+        nothing,
         ReentrantLock(),
     )
     _with_store_lock(store) do
@@ -1173,6 +1189,7 @@ function _request_response(
             store.index_offset = Int64(filesize(store.path))
         end
         store.cache_offset = Int64(filesize(store.cache_path))
+        store.cache_file_identity = _near_dup_cache_file_identity(store.cache_path)
         store.cache_file_records += 1
         _cache_store_record!(store, cache_record)
         if store.cache_file_records > 2 * store.cache_capacity

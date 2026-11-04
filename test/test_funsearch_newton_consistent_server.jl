@@ -699,6 +699,54 @@ end
         end
     end
 
+    @testset "Peer refresh after near-duplicate cache compaction" begin
+        respond = (request, curves_path, index_path, store) -> server_module._request_response(
+            request,
+            curves_path;
+            near_dup_index_path=index_path,
+            near_dup_store=store,
+            curve_builder=stubs.curve_builder,
+            zeta_builder=stubs.zeta_builder,
+            polygon_builder=stubs.polygon_builder,
+            reference_polygons=stubs.reference,
+        )
+        mktempdir() do directory
+            curves_path = joinpath(directory, "curves.jsonl")
+            index_path = joinpath(directory, "near-dup-index.jsonl")
+            store = server_module.NearDuplicateStore(index_path; cache_capacity=2)
+            peer_store = server_module.NearDuplicateStore(index_path; cache_capacity=2)
+            first_request = tagged_request([1]; near_dup=0, program_id="small-peer-offset")
+            @test respond(first_request, curves_path, index_path, store)["status"] == "OK"
+            @test respond(first_request, curves_path, index_path, peer_store)["status"] == "OK"
+            stale_offset = peer_store.cache_offset
+
+            last_request = nothing
+            last_response = nothing
+            for tag in 1:4
+                last_request = tagged_request(
+                    fill(tag, 64);
+                    near_dup=0,
+                    program_id="large-after-compaction-$tag",
+                )
+                last_response = respond(last_request, curves_path, index_path, store)
+                @test last_response["status"] == "OK"
+            end
+
+            cache_path = server_module._near_dup_cache_path(index_path)
+            @test filesize(cache_path) > stale_offset
+            @test length(readlines(cache_path)) == 2
+            cache_key = server_module._request_cache_key(
+                server_module._instance_key(server_module._parse_instance(last_request["instance"])),
+                last_request["samples"],
+                last_request["program_id"],
+            )
+            server_module._with_store_lock(peer_store) do
+                @test haskey(peer_store.cache, cache_key)
+            end
+            @test respond(last_request, curves_path, index_path, peer_store) == last_response
+        end
+    end
+
     @testset "Near-duplicate messages truncate on token boundaries" begin
         mktempdir() do directory
             curves_path = joinpath(directory, "curves.jsonl")
@@ -1008,5 +1056,24 @@ end
             "--near-dup-index", "custom-index.jsonl",
         ])["near-dup-index"] == "custom-index.jsonl"
         @test_throws ArgumentError server_module._server_arguments(["--socket", "score.sock"])
+    end
+
+    @testset "Environment overrides for startup arguments" begin
+        withenv(
+            "FUNSEARCH_NEWTON_SOCKET" => "env.sock",
+            "FUNSEARCH_NEWTON_READY" => "env-ready.json",
+            "FUNSEARCH_NEWTON_CURVES" => "env-curves.jsonl",
+            "FUNSEARCH_NEWTON_NEAR_DUP_INDEX" => "env-index.jsonl",
+        ) do
+            @test server_module._server_arguments(String[]) == Dict(
+                "socket" => "env.sock",
+                "ready-file" => "env-ready.json",
+                "curves" => "env-curves.jsonl",
+                "near-dup-index" => "env-index.jsonl",
+            )
+            @test server_module._server_arguments([
+                "--near-dup-index", "argument-index.jsonl",
+            ])["near-dup-index"] == "argument-index.jsonl"
+        end
     end
 end

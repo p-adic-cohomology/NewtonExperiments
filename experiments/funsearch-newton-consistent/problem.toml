@@ -1,6 +1,6 @@
 [problem]
 name = "Newton polygons of plane quintics"
-instance = "family=plane,d=5,p=7,k=16,curve_reward=log,lambda=0.25,beta=0.5,ss_codim=1"
+instance = "family=plane,d=5,p=7,k=16,curve_reward=log,lambda=0.25,beta=0.5,ss_codim=1,near_dup=0.5"
 
 [candidate]
 language = "c"

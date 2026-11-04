@@ -12,13 +12,14 @@ const server_module = FunSearchNewtonConsistentServer
 const strata = server_module.NewtonStrata
 const NONORDINARY_FIXTURES = Dict{Int,Vector{Int}}()
 
-function test_instance(p; k=16, curve_reward="log", lambda=0.25, beta=0.5, ss_codim=1)
-    "family=plane,d=5,p=$p,k=$k,curve_reward=$curve_reward,lambda=$lambda,beta=$beta,ss_codim=$ss_codim"
+function test_instance(p; k=16, curve_reward="log", lambda=0.25, beta=0.5, ss_codim=1, near_dup=0)
+    "family=plane,d=5,p=$p,k=$k,curve_reward=$curve_reward,lambda=$lambda,beta=$beta,ss_codim=$ss_codim,near_dup=$near_dup"
 end
 
 function tagged_coefficients(tag, p=7)
     coefficients = zeros(Int, 21)
-    coefficients[1] = tag
+    coefficients[1] = mod(tag, p)
+    coefficients[2] = div(tag, p)
     coefficients[6] = mod(tag + 1, p)
     coefficients[21] = mod(tag + 2, p)
     coefficients
@@ -52,10 +53,25 @@ function stub_builders(polygons)
     )
     known = Set([polygon_key(polygons.codim_two), polygon_key(polygons.supersingular), polygon_key(polygons.ordinary)])
     reference = Dict(7 => known)
-    curve_builder = (p, coefficients) -> coefficients[1]
+    curve_builder = (p, coefficients) -> coefficients[1] + p * coefficients[2]
     zeta_builder = (curve; kwargs...) -> [curve]
-    polygon_builder = (p, zeta) -> by_id[Int(first(zeta))]
+    polygon_builder = (p, zeta) -> get(by_id, Int(first(zeta)), polygons.codim_two)
     (curve_builder=curve_builder, zeta_builder=zeta_builder, polygon_builder=polygon_builder, reference=reference)
+end
+
+function tagged_request(tags; p=7, near_dup=0.5, curve_reward="linear", lambda=0, beta=0, program_id=join(tags, "-"))
+    Dict{String,Any}(
+        "program_id" => program_id,
+        "instance" => test_instance(
+            p;
+            k=length(tags),
+            near_dup=near_dup,
+            curve_reward=curve_reward,
+            lambda=lambda,
+            beta=beta,
+        ),
+        "samples" => [tagged_coefficients(tag, p) for tag in tags],
+    )
 end
 
 function polynomial_multiply(a, b, p)
@@ -146,13 +162,19 @@ end
         @test defaults.lambda == 0.25
         @test defaults.beta == 0.5
         @test defaults.ss_codim == 1
+        @test defaults.near_dup == 0.0
+        @test server_module._parse_instance("p=7,near_dup=0").near_dup == 0.0
+        @test server_module._parse_instance("p=7,near_dup=0.5").near_dup == 0.5
+        @test server_module._parse_instance("p=7,near_dup=1").near_dup == 1.0
         @test server_module._parse_instance("p=7,k=1").k == 1
         @test server_module._parse_instance("p=7,k=64").k == 64
         for invalid in ("p=7,k=0", "p=7,k=65", "p=7,curve_reward=depth", "p=7,lambda=-1",
-                        "p=7,lambda=Inf", "p=7,beta=NaN", "p=7,ss_codim=-1", "p=7,ss_codim=13")
+                        "p=7,lambda=Inf", "p=7,beta=NaN", "p=7,ss_codim=-1", "p=7,ss_codim=13",
+                        "p=7,near_dup=-0.01", "p=7,near_dup=1.01", "p=7,near_dup=Inf", "p=7,near_dup=NaN")
             @test_throws ArgumentError server_module._parse_instance(invalid)
         end
         @test_throws ArgumentError server_module._parse_instance("p=7,k=1,k=2")
+        @test_throws ArgumentError server_module._parse_instance("p=7,near_dup=0.5,near_dup=0")
         @test_throws ArgumentError server_module._parse_instance("p=7,unknown=1")
         for (field, replacement) in (("reward=mixed", "curve_reward"), ("eps=0.01", "none"),
                                      ("exclude_ss=true", "ss_codim"))
@@ -375,6 +397,389 @@ end
         end
     end
 
+    @testset "Near-duplicate threshold and score boundary" begin
+        respond = (request, curves_path, index_path) -> server_module._request_response(
+            request,
+            curves_path;
+            near_dup_index_path=index_path,
+            curve_builder=stubs.curve_builder,
+            zeta_builder=stubs.zeta_builder,
+            polygon_builder=stubs.polygon_builder,
+            reference_polygons=stubs.reference,
+        )
+        mktempdir() do directory
+            curves_path = joinpath(directory, "curves.jsonl")
+            index_path = joinpath(directory, "near-dup-index.jsonl")
+            earlier = tagged_request([1, 3])
+            candidate = tagged_request([1, 2])
+            @test respond(earlier, curves_path, index_path)["status"] == "OK"
+            response = respond(candidate, curves_path, index_path)
+            @test response["status"] == "INVALID"
+            @test response["score"] == 0.0
+            @test response["sig"] == server_module._empty_signature()
+            @test startswith(response["msg"], "near-dup: 1/2 classes")
+            @test ncodeunits(response["msg"]) < 256
+            records = JSON.parse.(readlines(curves_path))
+            @test records[1]["program_status"] == "OK"
+            @test records[1]["near_duplicate_of"] === nothing
+            @test records[3]["program_status"] == "INVALID"
+            @test records[3]["near_duplicate_of"] == records[1]["batch_id"]
+            @test records[3]["near_dup_overlap"] == 0.5
+            @test length(JSON.parse.(readlines(index_path))) == 1
+            invalid_request = Dict{String,Any}(
+                "instance" => test_instance(7; k=1, near_dup=0.5),
+                "samples" => [zeros(Int, 21)],
+            )
+            @test respond(invalid_request, curves_path, index_path)["status"] == "INVALID"
+            error_request = Dict{String,Any}(
+                "instance" => test_instance(7; k=1, near_dup=0.5),
+                "samples" => [copy(server_module.FERMAT_COEFFICIENTS)],
+            )
+            error_response = server_module._request_response(
+                error_request,
+                curves_path;
+                near_dup_index_path=index_path,
+                curve_builder=(p, coefficients) -> "curve",
+                zeta_builder=(curve; kwargs...) -> error("injected zeta failure"),
+                polygon_builder=stubs.polygon_builder,
+                reference_polygons=stubs.reference,
+            )
+            @test error_response["status"] == "ERROR"
+            @test length(JSON.parse.(readlines(index_path))) == 1
+        end
+
+        mktempdir() do directory
+            curves_path = joinpath(directory, "curves.jsonl")
+            index_path = joinpath(directory, "near-dup-index.jsonl")
+            earlier = tagged_request([3, 9, 10])
+            candidate = tagged_request([3, 5, 6])
+            @test respond(earlier, curves_path, index_path)["status"] == "OK"
+            response = respond(candidate, curves_path, index_path)
+            @test response["status"] == "OK"
+            @test !startswith(response["msg"], "near-dup:")
+            @test length(JSON.parse.(readlines(index_path))) == 2
+        end
+
+        mktempdir() do directory
+            curves_path = joinpath(directory, "curves.jsonl")
+            index_path = joinpath(directory, "near-dup-index.jsonl")
+            earlier = tagged_request([1, 3]; near_dup=0, program_id="opt-out-first")
+            candidate = tagged_request([1, 3]; near_dup=0, program_id="opt-out-second")
+            @test respond(earlier, curves_path, index_path)["status"] == "OK"
+            response = respond(candidate, curves_path, index_path)
+            @test response["status"] == "OK"
+            @test !startswith(response["msg"], "near-dup:")
+            @test !isfile(index_path)
+        end
+    end
+
+    @testset "Near-duplicate higher-score and per-program comparisons" begin
+        respond = (request, curves_path, index_path) -> server_module._request_response(
+            request,
+            curves_path;
+            near_dup_index_path=index_path,
+            curve_builder=stubs.curve_builder,
+            zeta_builder=stubs.zeta_builder,
+            polygon_builder=stubs.polygon_builder,
+            reference_polygons=stubs.reference,
+        )
+        mktempdir() do directory
+            curves_path = joinpath(directory, "curves.jsonl")
+            index_path = joinpath(directory, "near-dup-index.jsonl")
+            earlier = tagged_request([1, 2, 4])
+            higher = tagged_request([1, 3, 4])
+            @test respond(earlier, curves_path, index_path)["status"] == "OK"
+            response = respond(higher, curves_path, index_path)
+            @test response["status"] == "OK"
+            @test response["score"] > 1.0
+            @test length(JSON.parse.(readlines(index_path))) == 2
+        end
+
+        mktempdir() do directory
+            curves_path = joinpath(directory, "curves.jsonl")
+            index_path = joinpath(directory, "near-dup-index.jsonl")
+            earlier_one = tagged_request([1, 5, 3, 11, 12])
+            earlier_two = tagged_request([6, 7, 3, 13, 14])
+            candidate = tagged_request([1, 5, 6, 7, 8])
+            @test respond(earlier_one, curves_path, index_path)["status"] == "OK"
+            @test respond(earlier_two, curves_path, index_path)["status"] == "OK"
+            response = respond(candidate, curves_path, index_path)
+            @test response["status"] == "OK"
+            @test !startswith(response["msg"], "near-dup:")
+            @test length(JSON.parse.(readlines(index_path))) == 3
+        end
+    end
+
+    @testset "Near-duplicate idempotency, instances, empty sets, and restart" begin
+        respond = (request, curves_path, index_path, near_dup_store=nothing) -> server_module._request_response(
+            request,
+            curves_path;
+            near_dup_index_path=index_path,
+            near_dup_store=near_dup_store,
+            curve_builder=stubs.curve_builder,
+            zeta_builder=stubs.zeta_builder,
+            polygon_builder=stubs.polygon_builder,
+            reference_polygons=stubs.reference,
+        )
+        mktempdir() do directory
+            curves_path = joinpath(directory, "curves.jsonl")
+            index_path = joinpath(directory, "near-dup-index.jsonl")
+            request = tagged_request([1, 3])
+            first_response = respond(request, curves_path, index_path)
+            second_response = respond(request, curves_path, index_path)
+            @test first_response == second_response
+            @test second_response["status"] == "OK"
+            @test !startswith(second_response["msg"], "near-dup:")
+            @test length(JSON.parse.(readlines(index_path))) == 1
+        end
+
+        mktempdir() do directory
+            curves_path = joinpath(directory, "curves.jsonl")
+            index_path = joinpath(directory, "near-dup-index.jsonl")
+            earlier = tagged_request([1, 3]; program_id="earlier-program")
+            candidate = tagged_request([1, 3]; program_id="new-program")
+            @test respond(earlier, curves_path, index_path)["status"] == "OK"
+            response = respond(candidate, curves_path, index_path)
+            @test response["status"] == "INVALID"
+            @test startswith(response["msg"], "near-dup: 2/2 classes")
+            records = JSON.parse.(readlines(curves_path))
+            @test records[end]["program_id"] == "new-program"
+            @test records[end]["program_status"] == "INVALID"
+            @test length(JSON.parse.(readlines(index_path))) == 1
+        end
+
+        mktempdir() do directory
+            curves_path = joinpath(directory, "curves.jsonl")
+            index_path = joinpath(directory, "near-dup-index.jsonl")
+            earlier = tagged_request([1, 3])
+            candidate = tagged_request([1, 2])
+            first_store = server_module.NearDuplicateStore(index_path)
+            second_store = server_module.NearDuplicateStore(index_path)
+            @test respond(earlier, curves_path, index_path, first_store)["status"] == "OK"
+            @test isempty(second_store.records)
+            response = respond(candidate, curves_path, index_path, second_store)
+            @test response["status"] == "INVALID"
+            @test length(second_store.records) == 1
+        end
+
+        mktempdir() do directory
+            curves_path = joinpath(directory, "curves.jsonl")
+            index_path = joinpath(directory, "near-dup-index.jsonl")
+            request = tagged_request([1, 3])
+            store = server_module.NearDuplicateStore(index_path)
+            @test respond(request, curves_path, index_path, store)["status"] == "OK"
+            rm(curves_path)
+            mkdir(curves_path)
+            uncached_request = tagged_request(
+                [4];
+                near_dup=0.5,
+                program_id="uncached-after-retention-failure",
+            )
+            response = respond(uncached_request, curves_path, index_path, store)
+            @test response["status"] == "ERROR"
+            @test startswith(response["msg"], "curve retention failed:")
+            @test length(JSON.parse.(readlines(index_path))) == 1
+            cache_path = server_module._near_dup_cache_path(index_path)
+            @test length(JSON.parse.(readlines(cache_path))) == 1
+            rm(curves_path; recursive=true)
+            @test respond(uncached_request, curves_path, index_path, store)["status"] == "OK"
+            @test length(JSON.parse.(readlines(index_path))) == 2
+        end
+
+        mktempdir() do directory
+            curves_path = joinpath(directory, "curves.jsonl")
+            index_path = joinpath(directory, "near-dup-index.jsonl")
+            ordinary_one = tagged_request([4, 4])
+            ordinary_two = tagged_request([4, 4])
+            ordinary_two["samples"][1][3] = 1
+            @test respond(ordinary_one, curves_path, index_path)["status"] == "OK"
+            @test respond(ordinary_two, curves_path, index_path)["status"] == "OK"
+            records = JSON.parse.(readlines(index_path))
+            @test length(records) == 2
+            @test all(isempty(record["nonordinary_keys"]) for record in records)
+        end
+
+        mktempdir() do directory
+            curves_path = joinpath(directory, "curves.jsonl")
+            index_path = joinpath(directory, "near-dup-index.jsonl")
+            @test respond(tagged_request([1, 3]; p=7), curves_path, index_path)["status"] == "OK"
+            @test respond(tagged_request([1, 3]; p=11), curves_path, index_path)["status"] == "OK"
+            records = JSON.parse.(readlines(index_path))
+            @test length(records) == 2
+            @test length(unique(record["instance"] for record in records)) == 2
+        end
+
+        mktempdir() do directory
+            curves_path = joinpath(directory, "curves.jsonl")
+            index_path = joinpath(directory, "near-dup-index.jsonl")
+            earlier = tagged_request([1, 3])
+            candidate = tagged_request([1, 2])
+            @test respond(earlier, curves_path, index_path)["status"] == "OK"
+            restarted_store = server_module.NearDuplicateStore(index_path)
+            response = respond(candidate, curves_path, index_path, restarted_store)
+            @test response["status"] == "INVALID"
+            @test startswith(response["msg"], "near-dup:")
+            @test respond(candidate, curves_path, index_path, restarted_store) == response
+            @test length(JSON.parse.(readlines(index_path))) == 1
+        end
+    end
+
+    @testset "Near-duplicate search skips common postings" begin
+        mktempdir() do directory
+            store = server_module.NearDuplicateStore(joinpath(directory, "index.jsonl"))
+            instance = "p=7"
+            for index in 1:20
+                record = Dict{String,Any}(
+                    "instance" => instance,
+                    "nonordinary_keys" => ["common"],
+                    "score" => 2.0,
+                    "batch_id" => "common-$index",
+                )
+                push!(store.records, record)
+                server_module._index_store_record!(store, record)
+            end
+            rare_record = Dict{String,Any}(
+                "instance" => instance,
+                "nonordinary_keys" => ["common", "rare-a", "rare-b"],
+                "score" => 2.0,
+                "batch_id" => "rare",
+            )
+            push!(store.records, rare_record)
+            server_module._index_store_record!(store, rare_record)
+
+            search_keys = server_module._near_duplicate_search_keys(
+                store,
+                instance,
+                ["common", "rare-a", "rare-b", "rare-c"],
+                2,
+                1.0,
+            )
+            @test search_keys == ["rare-a", "rare-b"]
+            @test length(store.by_instance_key[(instance, "common")]) == 21
+        end
+    end
+
+    @testset "Near-duplicate response cache remains bounded" begin
+        respond = (request, curves_path, index_path, store) -> server_module._request_response(
+            request,
+            curves_path;
+            near_dup_index_path=index_path,
+            near_dup_store=store,
+            curve_builder=stubs.curve_builder,
+            zeta_builder=stubs.zeta_builder,
+            polygon_builder=stubs.polygon_builder,
+            reference_polygons=stubs.reference,
+        )
+        mktempdir() do directory
+            curves_path = joinpath(directory, "curves.jsonl")
+            index_path = joinpath(directory, "near-dup-index.jsonl")
+            store = server_module.NearDuplicateStore(index_path; cache_capacity=2)
+            last_request = nothing
+            for tag in 1:6
+                last_request = tagged_request(
+                    [tag];
+                    near_dup=0,
+                    program_id="bounded-$tag",
+                )
+                @test respond(last_request, curves_path, index_path, store)["status"] == "OK"
+            end
+
+            cache_path = server_module._near_dup_cache_path(index_path)
+            @test length(store.cache) == 2
+            @test length(readlines(cache_path)) <= 4
+            restarted_store = server_module.NearDuplicateStore(index_path; cache_capacity=2)
+            @test length(restarted_store.cache) == 2
+            @test length(readlines(cache_path)) <= 4
+            cache_key = server_module._request_cache_key(
+                server_module._instance_key(server_module._parse_instance(last_request["instance"])),
+                last_request["samples"],
+                last_request["program_id"],
+            )
+            @test haskey(restarted_store.cache, cache_key)
+        end
+    end
+
+    @testset "Peer refresh after near-duplicate cache compaction" begin
+        respond = (request, curves_path, index_path, store) -> server_module._request_response(
+            request,
+            curves_path;
+            near_dup_index_path=index_path,
+            near_dup_store=store,
+            curve_builder=stubs.curve_builder,
+            zeta_builder=stubs.zeta_builder,
+            polygon_builder=stubs.polygon_builder,
+            reference_polygons=stubs.reference,
+        )
+        mktempdir() do directory
+            curves_path = joinpath(directory, "curves.jsonl")
+            index_path = joinpath(directory, "near-dup-index.jsonl")
+            store = server_module.NearDuplicateStore(index_path; cache_capacity=2)
+            peer_store = server_module.NearDuplicateStore(index_path; cache_capacity=2)
+            first_request = tagged_request([1]; near_dup=0, program_id="small-peer-offset")
+            @test respond(first_request, curves_path, index_path, store)["status"] == "OK"
+            @test respond(first_request, curves_path, index_path, peer_store)["status"] == "OK"
+            stale_offset = peer_store.cache_offset
+
+            last_request = nothing
+            last_response = nothing
+            for tag in 1:4
+                last_request = tagged_request(
+                    fill(tag, 64);
+                    near_dup=0,
+                    program_id="large-after-compaction-$tag",
+                )
+                last_response = respond(last_request, curves_path, index_path, store)
+                @test last_response["status"] == "OK"
+            end
+
+            cache_path = server_module._near_dup_cache_path(index_path)
+            @test filesize(cache_path) > stale_offset
+            @test length(readlines(cache_path)) == 2
+            cache_key = server_module._request_cache_key(
+                server_module._instance_key(server_module._parse_instance(last_request["instance"])),
+                last_request["samples"],
+                last_request["program_id"],
+            )
+            server_module._with_store_lock(peer_store) do
+                @test haskey(peer_store.cache, cache_key)
+            end
+            @test respond(last_request, curves_path, index_path, peer_store) == last_response
+        end
+    end
+
+    @testset "Near-duplicate messages truncate on token boundaries" begin
+        mktempdir() do directory
+            curves_path = joinpath(directory, "curves.jsonl")
+            index_path = joinpath(directory, "near-dup-index.jsonl")
+            earlier = tagged_request(fill(3, 64); near_dup=0.5)
+            candidate = tagged_request(fill(3, 64); near_dup=0.5, program_id="same-zeta-new-batch")
+            for sample in candidate["samples"]
+                sample[3] = 1
+            end
+            @test server_module._request_response(
+                earlier,
+                curves_path;
+                near_dup_index_path=index_path,
+                curve_builder=stubs.curve_builder,
+                zeta_builder=stubs.zeta_builder,
+                polygon_builder=stubs.polygon_builder,
+                reference_polygons=stubs.reference,
+            )["status"] == "OK"
+            response = server_module._request_response(
+                candidate,
+                curves_path;
+                near_dup_index_path=index_path,
+                curve_builder=stubs.curve_builder,
+                zeta_builder=stubs.zeta_builder,
+                polygon_builder=stubs.polygon_builder,
+                reference_polygons=stubs.reference,
+            )
+            @test response["status"] == "INVALID"
+            @test ncodeunits(response["msg"]) <= 255
+            @test occursin(r" 4d \+\d+ more$", response["msg"])
+        end
+    end
+
     @testset "PGL3 transforms preserve zeta classes at p=7, 11, 13" begin
         for p in (7, 11, 13)
             rng = MersenneTwister(0x50474c33 + p)
@@ -509,6 +914,7 @@ end
             repository = normpath(joinpath(@__DIR__, ".."))
             server_script = joinpath(repository, "experiments", "funsearch-newton-consistent", "server", "score_server.jl")
             curves_path = joinpath(directory, "curves.jsonl")
+            index_path = joinpath(directory, "near-dup-index.jsonl")
             socket_paths = [joinpath(directory, "score-$index.sock") for index in 1:2]
             ready_paths = [joinpath(directory, "ready-$index.json") for index in 1:2]
             log_paths = [joinpath(directory, "server-$index.log") for index in 1:2]
@@ -518,7 +924,7 @@ end
                 for index in 1:2
                     log = open(log_paths[index], "w")
                     push!(server_logs, log)
-                    command = `$(Base.julia_cmd()) --threads=1 --project=$(Base.active_project()) $server_script --socket $(socket_paths[index]) --ready-file $(ready_paths[index]) --curves $curves_path`
+                    command = `$(Base.julia_cmd()) --threads=1 --project=$(Base.active_project()) $server_script --socket $(socket_paths[index]) --ready-file $(ready_paths[index]) --curves $curves_path --near-dup-index $index_path`
                     push!(server_processes, run(pipeline(command, stdout=log, stderr=log); wait=false))
                 end
 
@@ -578,6 +984,45 @@ end
                     @test length(Set(record["program_id"] for record in group)) == 1
                     @test [record["k"] for record in group] == collect(0:(batch_size - 1))
                 end
+
+                base = copy(NONORDINARY_FIXTURES[7])
+                rng = MersenneTwister(0x434f4e435552 + 7)
+                transformed = transform_curve(base, random_invertible_matrix(rng, 7), 7)
+                @test transformed != base
+                near_instance = test_instance(7; k=1, lambda=0, beta=0, near_dup=0.5)
+                submit_curve = function (socket_path, program_id, coefficients)
+                    connection = Sockets.connect(socket_path)
+                    try
+                        request = Dict{String,Any}(
+                            "program_id" => program_id,
+                            "instance" => near_instance,
+                            "samples" => [coefficients],
+                        )
+                        write(connection, JSON.json(request))
+                        write(connection, '\n')
+                        flush(connection)
+                        JSON.parse(readline(connection))
+                    finally
+                        close(connection)
+                    end
+                end
+                overlap_requests = Task[]
+                push!(overlap_requests, @async submit_curve(socket_paths[1], "overlap-base", base))
+                push!(overlap_requests, @async submit_curve(socket_paths[2], "overlap-transform", transformed))
+                overlap_responses = fetch.(overlap_requests)
+                @test count(response -> response["status"] == "OK", overlap_responses) == 1
+                @test count(response -> response["status"] == "INVALID", overlap_responses) == 1
+                @test count(response -> startswith(response["msg"], "near-dup:"), overlap_responses) == 1
+                index_records = JSON.parse.(readlines(index_path))
+                @test length(index_records) == 1
+                near_instance_key = server_module._instance_key(server_module._parse_instance(near_instance))
+                @test count(
+                    record -> record["instance"] == near_instance_key && !isempty(record["nonordinary_keys"]),
+                    index_records,
+                ) == 1
+                all_records = JSON.parse.(readlines(curves_path))
+                @test length(all_records) == 2 * batch_size + 2
+                @test count(record -> record["program_status"] == "INVALID", all_records) == 1
             finally
                 for process in server_processes
                     process_running(process) && kill(process)
@@ -598,7 +1043,37 @@ end
             "--socket", "score.sock",
             "--ready-file", "ready.json",
             "--curves", "curves.jsonl",
-        ]) == Dict("socket" => "score.sock", "ready-file" => "ready.json", "curves" => "curves.jsonl")
+        ]) == Dict(
+            "socket" => "score.sock",
+            "ready-file" => "ready.json",
+            "curves" => "curves.jsonl",
+            "near-dup-index" => "near-dup-index.jsonl",
+        )
+        @test server_module._server_arguments([
+            "--socket", "score.sock",
+            "--ready-file", "ready.json",
+            "--curves", "curves.jsonl",
+            "--near-dup-index", "custom-index.jsonl",
+        ])["near-dup-index"] == "custom-index.jsonl"
         @test_throws ArgumentError server_module._server_arguments(["--socket", "score.sock"])
+    end
+
+    @testset "Environment overrides for startup arguments" begin
+        withenv(
+            "FUNSEARCH_NEWTON_SOCKET" => "env.sock",
+            "FUNSEARCH_NEWTON_READY" => "env-ready.json",
+            "FUNSEARCH_NEWTON_CURVES" => "env-curves.jsonl",
+            "FUNSEARCH_NEWTON_NEAR_DUP_INDEX" => "env-index.jsonl",
+        ) do
+            @test server_module._server_arguments(String[]) == Dict(
+                "socket" => "env.sock",
+                "ready-file" => "env-ready.json",
+                "curves" => "env-curves.jsonl",
+                "near-dup-index" => "env-index.jsonl",
+            )
+            @test server_module._server_arguments([
+                "--near-dup-index", "argument-index.jsonl",
+            ])["near-dup-index"] == "argument-index.jsonl"
+        end
     end
 end

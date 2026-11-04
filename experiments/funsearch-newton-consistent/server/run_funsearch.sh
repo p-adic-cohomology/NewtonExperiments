@@ -17,9 +17,14 @@ fi
 MODE=$1
 PROBLEM_DIR=$(cd "$2" && pwd)
 shift 2
-INSTANCE="family=plane,d=5,p=7,k=16,curve_reward=log,lambda=0.25,beta=0.5,ss_codim=1"
+INSTANCE="family=plane,d=5,p=7,k=16,curve_reward=log,lambda=0.25,beta=0.5,ss_codim=1,near_dup=0.5"
 RUN_ID=""
 RUN_OPTIONS=()
+PENDING_CURVES=""
+PENDING_NEAR_DUP_INDEX=""
+PENDING_NEAR_DUP_CACHE=""
+PENDING_NEAR_DUP_LOCK=""
+PENDING_LOG=""
 
 while (($#)); do
     case "$1" in
@@ -108,14 +113,26 @@ if [[ "$MODE" == run ]]; then
     fi
     RUN_DIR="$PROBLEM_DIR/runs/$RUN_ID"
     PENDING_CURVES="$PROBLEM_DIR/runs/.${RUN_ID}.curves.jsonl"
+    PENDING_NEAR_DUP_INDEX="$PROBLEM_DIR/runs/.${RUN_ID}.near-dup-index.jsonl"
+    PENDING_NEAR_DUP_CACHE="${PENDING_NEAR_DUP_INDEX%.jsonl}.cache.jsonl"
+    PENDING_NEAR_DUP_LOCK="$PENDING_NEAR_DUP_INDEX.lock"
     PENDING_LOG="$PROBLEM_DIR/runs/.${RUN_ID}.server.log"
     if [[ -e "$RUN_DIR" || -L "$RUN_DIR" || -e "$PENDING_CURVES" || -L "$PENDING_CURVES" ||
+          -e "$PENDING_NEAR_DUP_INDEX" || -L "$PENDING_NEAR_DUP_INDEX" ||
+          -e "$PENDING_NEAR_DUP_CACHE" || -L "$PENDING_NEAR_DUP_CACHE" ||
+          -e "$PENDING_NEAR_DUP_LOCK" || -L "$PENDING_NEAR_DUP_LOCK" ||
           -e "$PENDING_LOG" || -L "$PENDING_LOG" ]]; then
         printf 'Run id already has output: %s\n' "$RUN_ID" >&2
         exit 1
     fi
     mkdir -p "$PROBLEM_DIR/runs"
     CURVES_PATH=$PENDING_CURVES
+    NEAR_DUP_INDEX_PATH=$PENDING_NEAR_DUP_INDEX
+    NEAR_DUP_CACHE_PATH=$PENDING_NEAR_DUP_CACHE
+    NEAR_DUP_LOCK_PATH=$PENDING_NEAR_DUP_LOCK
+    : > "$PENDING_NEAR_DUP_INDEX"
+    : > "$PENDING_NEAR_DUP_CACHE"
+    : > "$PENDING_NEAR_DUP_LOCK"
 fi
 
 RUNTIME_PARENT=${TMPDIR:-/tmp}
@@ -127,6 +144,9 @@ READY_FILES=()
 SERVER_PIDS=()
 if [[ "$MODE" == check ]]; then
     CURVES_PATH="$RUNTIME_DIR/curves.jsonl"
+    NEAR_DUP_INDEX_PATH="$RUNTIME_DIR/near-dup-index.jsonl"
+    NEAR_DUP_CACHE_PATH="$RUNTIME_DIR/near-dup-index.cache.jsonl"
+    NEAR_DUP_LOCK_PATH="$RUNTIME_DIR/near-dup-index.jsonl.lock"
 else
     : > "$PENDING_LOG"
     SERVER_LOG=$PENDING_LOG
@@ -150,9 +170,11 @@ cleanup_local() {
         fi
         rm -f "${SOCKET_PATHS[$index]}" "${READY_FILES[$index]}"
     done
-    rm -f "$READY_PATH" "$RUNTIME_DIR/server-pids" "$RUNTIME_DIR/server-sockets" "$CURVES_PATH"
+    rm -f "$READY_PATH" "$RUNTIME_DIR/server-pids" "$RUNTIME_DIR/server-sockets" \
+        "$CURVES_PATH" "$NEAR_DUP_INDEX_PATH" "$NEAR_DUP_CACHE_PATH" "$NEAR_DUP_LOCK_PATH"
     if [[ "$MODE" == run ]]; then
-        rm -f "$PENDING_CURVES" "$PENDING_LOG"
+        rm -f "$PENDING_CURVES" "$PENDING_NEAR_DUP_INDEX" "$PENDING_NEAR_DUP_CACHE" \
+            "$PENDING_NEAR_DUP_LOCK" "$PENDING_LOG"
     fi
     [[ "$MODE" == check ]] && rm -f "$SERVER_LOG"
     rmdir "$RUNTIME_DIR" 2>/dev/null || true
@@ -167,6 +189,7 @@ for ((index = 1; index <= SERVER_COUNT; ++index)); do
     READY_FILES+=("$ready_file")
     nohup "$JULIA_BIN" --threads=1 --project="$REPO_ROOT" "$SCRIPT_DIR/score_server.jl" \
         --socket "$socket_path" --ready-file "$ready_file" --curves "$CURVES_PATH" \
+        --near-dup-index "$NEAR_DUP_INDEX_PATH" \
         >>"$SERVER_LOG" 2>&1 </dev/null &
     SERVER_PIDS+=("$!")
 done
@@ -215,14 +238,14 @@ fi
 
 # FunSearch appends FS_RUN_DIR as the final positional argument when it runs
 # each hook; both helpers use that argument to locate the completed run.
-printf -v START_HOOK_BODY '%q %q %q %q "$1" && %q "$1"' \
-    "$SCRIPT_DIR/attach_run_artifacts.sh" "$PENDING_CURVES" "$PENDING_LOG" \
+printf -v START_HOOK_BODY '%q %q %q %q %q "$1" && %q "$1"' \
+    "$SCRIPT_DIR/attach_run_artifacts.sh" "$PENDING_CURVES" "$PENDING_NEAR_DUP_INDEX" "$PENDING_LOG" \
     "$READY_PATH" "$PACK_DIR/scripts/on-start.sh"
 printf -v START_HOOK 'sh -c %q fs-hook' "$START_HOOK_BODY"
 printf -v FINISH_HOOK_BODY \
-    '%q "$1"; pack_status=$?; %q %q %q %q "$1"; stop_status=$?; [ "$pack_status" -eq 0 ] && [ "$stop_status" -eq 0 ]' \
+    '%q "$1"; pack_status=$?; %q %q %q %q %q "$1"; stop_status=$?; [ "$pack_status" -eq 0 ] && [ "$stop_status" -eq 0 ]' \
     "$PACK_DIR/scripts/on-finish.sh" "$SCRIPT_DIR/stop_score_server.sh" \
-    "$RUNTIME_DIR" "$PENDING_CURVES" "$PENDING_LOG"
+    "$RUNTIME_DIR" "$PENDING_CURVES" "$PENDING_NEAR_DUP_INDEX" "$PENDING_LOG"
 printf -v FINISH_HOOK 'sh -c %q fs-hook' "$FINISH_HOOK_BODY"
 
 RUN_OUTPUT=$(run_funsearch run start "$PROBLEM_DIR" \

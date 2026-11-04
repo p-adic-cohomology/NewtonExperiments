@@ -20,13 +20,15 @@ S = (sum(r_i) / K) + lambda * max(r_i) + beta * I(any valid sample has a novel p
 
 The mean always divides by `K`, including invalid samples and duplicates. The novelty indicator is one when at least one successfully evaluated sample has a Newton polygon absent from both reference tables for that prime. The published and locally known polygons are loaded once at server startup. Defaults are `K=16`, `lambda=0.25`, and `beta=0.5`.
 
+The optional `near_dup=theta` field is finite in `[0, 1]` and defaults to `0` (off). When `theta > 0`, a program is `INVALID` if at least that fraction of its distinct non-ordinary zeta keys occurs in one earlier indexed program for the same instance and its score is no more than the earlier score plus `1e-9`; an empty key set is not checked.
+
 Coordinate changes in `PGL(3)`, variable rescalings, and rescaling the equation preserve the zeta function. They therefore produce the same class and add no score when repeated within a batch.
 
 Malformed coefficients and singular curves have sample status `INVALID`. A batch with no valid sample is `INVALID`. Any sample evaluation failure makes the whole batch `ERROR`; evaluation failures never become silent zero rewards.
 
 ## Message legend
 
-The response `msg` starts with `S=<score> distinct=<count>/<K>`, followed by one token per sample in `k` order. A number is the adjusted codimension; `ss` marks a supersingular sample; `d` marks a repeated zeta function. `i` means invalid and `e` means evaluation error. For example, `1ssd` is a supersingular sample with adjusted codimension 1 whose zeta function appeared earlier. If the message would exceed 255 bytes, the evaluator ends it with `+N more`.
+Ordinary scoring responses start with `S=<score> distinct=<count>/<K>`, followed by one token per sample in `k` order. A number is the adjusted codimension; `ss` marks a supersingular sample; `d` marks a repeated zeta function. `i` means invalid and `e` means evaluation error. For example, `1ssd` is a supersingular sample with adjusted codimension 1 whose zeta function appeared earlier. A near-duplicate rejection instead starts with `near-dup: <overlap>/<count> classes` and includes the earlier score. If the message would exceed 255 bytes, the evaluator ends it with `+N more` on a token boundary.
 
 ## Public constraints
 

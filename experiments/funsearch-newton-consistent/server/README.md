@@ -13,15 +13,17 @@ experiments/funsearch-newton-consistent/server/run_funsearch.sh check \
   experiments/funsearch-newton-consistent
 ```
 
-The default instance is `family=plane,d=5,p=7,k=16,curve_reward=log,lambda=0.25,beta=0.5,ss_codim=1`. To check another prime, pass the same fields with a different `p`:
+The default instance is `family=plane,d=5,p=7,k=16,curve_reward=log,lambda=0.25,beta=0.5,ss_codim=1,near_dup=0.5`. `near_dup` is a finite threshold from 0 through 1; 0 disables the cross-program rule. To check another prime, pass the same fields with a different `p`:
 
 ```sh
 experiments/funsearch-newton-consistent/server/run_funsearch.sh check \
   experiments/funsearch-newton-consistent \
-  --instance 'family=plane,d=5,p=13,k=16,curve_reward=log,lambda=0.25,beta=0.5,ss_codim=1'
+  --instance 'family=plane,d=5,p=13,k=16,curve_reward=log,lambda=0.25,beta=0.5,ss_codim=1,near_dup=0.5'
 ```
 
 The command prints `score-server-ready` followed by the ready JSON from each server, then the FunSearch check result. A successful evaluator check returns status `OK`.
+
+The pool shares `near-dup-index.jsonl` beside `curves.jsonl`. Each accepted near-duplicate-enabled program contributes one record, protected by an exclusive file lock so concurrent servers see each other's entries. `--near-dup-index PATH` (or `FUNSEARCH_NEWTON_NEAR_DUP_INDEX`) overrides the default path for a direct server launch. The adjacent `near-dup-index.cache.jsonl` keeps a 4,096-entry in-memory window and is compacted after 8,192 distinct request responses, preserving recent idempotent retries across restarts; older requests may be evaluated again. Check mode creates its index and bounded cache in the temporary runtime directory.
 
 For a linked worktree, prepare the pinned dependencies first:
 

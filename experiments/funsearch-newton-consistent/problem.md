@@ -28,7 +28,7 @@ Malformed coefficients and singular curves have sample status `INVALID`. A batch
 
 ## Message legend
 
-The response `msg` starts with `S=<score> distinct=<count>/<K>`, followed by one token per sample in `k` order. A number is the adjusted codimension; `ss` marks a supersingular sample; `d` marks a repeated zeta function. `i` means invalid and `e` means evaluation error. For example, `1ssd` is a supersingular sample with adjusted codimension 1 whose zeta function appeared earlier. A near-duplicate rejection starts with `near-dup: <overlap>/<count> classes` and includes the earlier score. If the message would exceed 255 bytes, the evaluator ends it with `+N more` on a token boundary.
+Ordinary scoring responses start with `S=<score> distinct=<count>/<K>`, followed by one token per sample in `k` order. A number is the adjusted codimension; `ss` marks a supersingular sample; `d` marks a repeated zeta function. `i` means invalid and `e` means evaluation error. For example, `1ssd` is a supersingular sample with adjusted codimension 1 whose zeta function appeared earlier. A near-duplicate rejection instead starts with `near-dup: <overlap>/<count> classes` and includes the earlier score. If the message would exceed 255 bytes, the evaluator ends it with `+N more` on a token boundary.
 
 ## Public constraints
 

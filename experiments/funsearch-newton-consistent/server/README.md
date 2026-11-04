@@ -23,7 +23,7 @@ experiments/funsearch-newton-consistent/server/run_funsearch.sh check \
 
 The command prints `score-server-ready` followed by the ready JSON from each server, then the FunSearch check result. A successful evaluator check returns status `OK`.
 
-The pool shares `near-dup-index.jsonl` beside `curves.jsonl`. Each accepted program contributes one record, protected by an exclusive file lock so concurrent servers see each other's entries. `--near-dup-index PATH` (or `FUNSEARCH_NEWTON_NEAR_DUP_INDEX`) overrides the default path for a direct server launch. The adjacent `near-dup-index.cache.jsonl` preserves idempotent responses across server restarts. Check mode creates its index in the temporary runtime directory.
+The pool shares `near-dup-index.jsonl` beside `curves.jsonl`. Each accepted near-duplicate-enabled program contributes one record, protected by an exclusive file lock so concurrent servers see each other's entries. `--near-dup-index PATH` (or `FUNSEARCH_NEWTON_NEAR_DUP_INDEX`) overrides the default path for a direct server launch. The adjacent `near-dup-index.cache.jsonl` keeps a 4,096-entry in-memory window and is compacted after 8,192 distinct request responses, preserving recent idempotent retries across restarts; older requests may be evaluated again. Check mode creates its index and bounded cache in the temporary runtime directory.
 
 For a linked worktree, prepare the pinned dependencies first:
 

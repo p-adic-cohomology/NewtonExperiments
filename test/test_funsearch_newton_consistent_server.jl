@@ -459,6 +459,18 @@ end
             @test !startswith(response["msg"], "near-dup:")
             @test length(JSON.parse.(readlines(index_path))) == 2
         end
+
+        mktempdir() do directory
+            curves_path = joinpath(directory, "curves.jsonl")
+            index_path = joinpath(directory, "near-dup-index.jsonl")
+            earlier = tagged_request([1, 3]; near_dup=0, program_id="opt-out-first")
+            candidate = tagged_request([1, 3]; near_dup=0, program_id="opt-out-second")
+            @test respond(earlier, curves_path, index_path)["status"] == "OK"
+            response = respond(candidate, curves_path, index_path)
+            @test response["status"] == "OK"
+            @test !startswith(response["msg"], "near-dup:")
+            @test !isfile(index_path)
+        end
     end
 
     @testset "Near-duplicate higher-score and per-program comparisons" begin
@@ -524,6 +536,21 @@ end
         mktempdir() do directory
             curves_path = joinpath(directory, "curves.jsonl")
             index_path = joinpath(directory, "near-dup-index.jsonl")
+            earlier = tagged_request([1, 3]; program_id="earlier-program")
+            candidate = tagged_request([1, 3]; program_id="new-program")
+            @test respond(earlier, curves_path, index_path)["status"] == "OK"
+            response = respond(candidate, curves_path, index_path)
+            @test response["status"] == "INVALID"
+            @test startswith(response["msg"], "near-dup: 2/2 classes")
+            records = JSON.parse.(readlines(curves_path))
+            @test records[end]["program_id"] == "new-program"
+            @test records[end]["program_status"] == "INVALID"
+            @test length(JSON.parse.(readlines(index_path))) == 1
+        end
+
+        mktempdir() do directory
+            curves_path = joinpath(directory, "curves.jsonl")
+            index_path = joinpath(directory, "near-dup-index.jsonl")
             earlier = tagged_request([1, 3])
             candidate = tagged_request([1, 2])
             first_store = server_module.NearDuplicateStore(index_path)
@@ -543,9 +570,20 @@ end
             @test respond(request, curves_path, index_path, store)["status"] == "OK"
             rm(curves_path)
             mkdir(curves_path)
-            response = respond(request, curves_path, index_path, store)
+            uncached_request = tagged_request(
+                [4];
+                near_dup=0.5,
+                program_id="uncached-after-retention-failure",
+            )
+            response = respond(uncached_request, curves_path, index_path, store)
             @test response["status"] == "ERROR"
             @test startswith(response["msg"], "curve retention failed:")
+            @test length(JSON.parse.(readlines(index_path))) == 1
+            cache_path = server_module._near_dup_cache_path(index_path)
+            @test length(JSON.parse.(readlines(cache_path))) == 1
+            rm(curves_path; recursive=true)
+            @test respond(uncached_request, curves_path, index_path, store)["status"] == "OK"
+            @test length(JSON.parse.(readlines(index_path))) == 2
         end
 
         mktempdir() do directory
@@ -583,6 +621,81 @@ end
             @test startswith(response["msg"], "near-dup:")
             @test respond(candidate, curves_path, index_path, restarted_store) == response
             @test length(JSON.parse.(readlines(index_path))) == 1
+        end
+    end
+
+    @testset "Near-duplicate search skips common postings" begin
+        mktempdir() do directory
+            store = server_module.NearDuplicateStore(joinpath(directory, "index.jsonl"))
+            instance = "p=7"
+            for index in 1:20
+                record = Dict{String,Any}(
+                    "instance" => instance,
+                    "nonordinary_keys" => ["common"],
+                    "score" => 2.0,
+                    "batch_id" => "common-$index",
+                )
+                push!(store.records, record)
+                server_module._index_store_record!(store, record)
+            end
+            rare_record = Dict{String,Any}(
+                "instance" => instance,
+                "nonordinary_keys" => ["common", "rare-a", "rare-b"],
+                "score" => 2.0,
+                "batch_id" => "rare",
+            )
+            push!(store.records, rare_record)
+            server_module._index_store_record!(store, rare_record)
+
+            search_keys = server_module._near_duplicate_search_keys(
+                store,
+                instance,
+                ["common", "rare-a", "rare-b", "rare-c"],
+                2,
+                1.0,
+            )
+            @test search_keys == ["rare-a", "rare-b"]
+            @test length(store.by_instance_key[(instance, "common")]) == 21
+        end
+    end
+
+    @testset "Near-duplicate response cache remains bounded" begin
+        respond = (request, curves_path, index_path, store) -> server_module._request_response(
+            request,
+            curves_path;
+            near_dup_index_path=index_path,
+            near_dup_store=store,
+            curve_builder=stubs.curve_builder,
+            zeta_builder=stubs.zeta_builder,
+            polygon_builder=stubs.polygon_builder,
+            reference_polygons=stubs.reference,
+        )
+        mktempdir() do directory
+            curves_path = joinpath(directory, "curves.jsonl")
+            index_path = joinpath(directory, "near-dup-index.jsonl")
+            store = server_module.NearDuplicateStore(index_path; cache_capacity=2)
+            last_request = nothing
+            for tag in 1:6
+                last_request = tagged_request(
+                    [tag];
+                    near_dup=0,
+                    program_id="bounded-$tag",
+                )
+                @test respond(last_request, curves_path, index_path, store)["status"] == "OK"
+            end
+
+            cache_path = server_module._near_dup_cache_path(index_path)
+            @test length(store.cache) == 2
+            @test length(readlines(cache_path)) <= 4
+            restarted_store = server_module.NearDuplicateStore(index_path; cache_capacity=2)
+            @test length(restarted_store.cache) == 2
+            @test length(readlines(cache_path)) <= 4
+            cache_key = server_module._request_cache_key(
+                server_module._instance_key(server_module._parse_instance(last_request["instance"])),
+                last_request["samples"],
+                last_request["program_id"],
+            )
+            @test haskey(restarted_store.cache, cache_key)
         end
     end
 
@@ -853,7 +966,7 @@ end
                 @test count(response -> response["status"] == "INVALID", overlap_responses) == 1
                 @test count(response -> startswith(response["msg"], "near-dup:"), overlap_responses) == 1
                 index_records = JSON.parse.(readlines(index_path))
-                @test length(index_records) == 2
+                @test length(index_records) == 1
                 near_instance_key = server_module._instance_key(server_module._parse_instance(near_instance))
                 @test count(
                     record -> record["instance"] == near_instance_key && !isempty(record["nonordinary_keys"]),

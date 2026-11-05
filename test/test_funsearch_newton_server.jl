@@ -165,6 +165,9 @@ using Sockets
         @test !(codim8_key in server_module._load_reference_table(server_module.REFERENCE_PATH)[7])
         @test codim8_key in server_module._load_reference_table(server_module.KNOWN_POLYGONS_PATH)[7]
         @test codim8_key in server_module.REFERENCE_POLYGONS[7]
+        p11_supersingular_key = "0;1/2;1;3/2;2;5/2;3;7/2;4;9/2;5;11/2;6"
+        @test p11_supersingular_key in server_module._load_reference_table(server_module.KNOWN_POLYGONS_PATH)[11]
+        @test p11_supersingular_key in server_module.REFERENCE_POLYGONS[11]
         @test issubset(server_module._load_reference_table(server_module.REFERENCE_PATH)[11],
                        server_module.REFERENCE_POLYGONS[11])
 
